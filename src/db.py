@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -37,193 +38,270 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+CURRENT_SCHEMA_VERSION = 1
+
+
+def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> None:
+    """
+    Runs SQLite schema creation and migrations once per database.
+    # ponytail: manual PRAGMA user_version check is sufficient for additive schema changes; deferred Alembic until complex migrations needed.
+    """
+    close_conn = False
+    if isinstance(db_path_or_conn, sqlite3.Connection):
+        conn = db_path_or_conn
+    else:
+        db_path = db_path_or_conn
+        if db_path is None:
+            db_path = os.getenv("CERTOPS_DB_PATH", os.getenv("DB_PATH", "./certops.db"))
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        close_conn = True
+
+    try:
+        cur = conn.execute("PRAGMA user_version")
+        ver = cur.fetchone()[0]
+        if ver >= CURRENT_SCHEMA_VERSION:
+            return
+
+        print(f"[DB MIGRATION] Running DB schema migrations (version {ver} -> {CURRENT_SCHEMA_VERSION})")
+        logger.info("Running DB schema migrations (version %s -> %s)", ver, CURRENT_SCHEMA_VERSION)
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS certificates (
+                vault_source TEXT NOT NULL,
+                name TEXT NOT NULL,
+                expiry_utc TEXT NOT NULL,
+                version TEXT,
+                common_name TEXT,
+                updated_at TEXT,
+                connector_category TEXT DEFAULT 'secret_store',
+                pipeline_stage TEXT,
+                pending_cert_pem TEXT,
+                pending_cert_key TEXT,
+                tenant_id TEXT DEFAULT 'default',
+                PRIMARY KEY (vault_source, name)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_windows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER REFERENCES groups(id),
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                recurrence TEXT DEFAULT 'once'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_policies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER REFERENCES groups(id),
+                threshold_days REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vault_source TEXT,
+                cert_id TEXT NOT NULL,
+                policy_id INTEGER REFERENCES notification_policies(id),
+                sent_at TEXT NOT NULL
+            )
+            """
+        )
+        # Idempotent column migrations for existing databases
+        cursor = conn.execute("PRAGMA table_info(certificates)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        if "connector_category" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN connector_category TEXT DEFAULT 'secret_store'")
+        if "pipeline_stage" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN pipeline_stage TEXT")
+        if "renewal_threshold_days" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN renewal_threshold_days REAL")
+        if "group_id" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN group_id INTEGER REFERENCES groups(id)")
+        if "next_renewal_at" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN next_renewal_at TEXT")
+        if "next_notification_check_at" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN next_notification_check_at TEXT")
+        if "pending_cert_pem" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN pending_cert_pem TEXT")
+        if "pending_cert_key" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN pending_cert_key TEXT")
+        if "tenant_id" not in existing_cols:
+            conn.execute("ALTER TABLE certificates ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS renewal_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vault_source TEXT,
+                cert_id TEXT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                connector_category TEXT,
+                connector_type TEXT,
+                old_expiry TEXT,
+                new_expiry TEXT,
+                old_fingerprint TEXT,
+                new_fingerprint TEXT,
+                success BOOLEAN NOT NULL,
+                detail TEXT
+            )
+            """
+        )
+        cursor = conn.execute("PRAGMA table_info(renewal_log)")
+        log_cols = {row[1] for row in cursor.fetchall()}
+        if "vault_source" not in log_cols:
+            conn.execute("ALTER TABLE renewal_log ADD COLUMN vault_source TEXT")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                created_at TEXT NOT NULL,
+                tenant_id TEXT DEFAULT 'default'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_invites (
+                token TEXT PRIMARY KEY,
+                email TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                expires_utc TEXT NOT NULL,
+                used INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS connectors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                category TEXT NOT NULL,
+                renewal_threshold_days REAL NULL,
+                config TEXT NOT NULL DEFAULT '{}',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                tenant_id TEXT DEFAULT 'default'
+            )
+            """
+        )
+
+        cursor = conn.execute("PRAGMA table_info(users)")
+        usr_cols = {row[1] for row in cursor.fetchall()}
+        if "tenant_id" not in usr_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+
+        cursor = conn.execute("PRAGMA table_info(connectors)")
+        conn_cols = {row[1] for row in cursor.fetchall()}
+        if "tenant_id" not in conn_cols:
+            conn.execute("ALTER TABLE connectors ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                actor_user_id INTEGER,
+                actor_email TEXT,
+                target TEXT,
+                details TEXT,
+                timestamp TEXT NOT NULL
+            )
+            """
+        )
+
+        cur = conn.execute("SELECT COUNT(*) FROM connectors")
+        if cur.fetchone()[0] == 0 and os.getenv("SKIP_DEFAULT_CONNECTORS") != "1":
+            now_iso = datetime.now(timezone.utc).isoformat()
+            defaults = [
+                ("hashicorp", "secret_store", None, "{}", 1, now_iso, "default"),
+                ("azure", "secret_store", None, "{}", 1, now_iso, "default"),
+                ("ssh_host", "host", None, "{}", 1, now_iso, "default"),
+                ("step_ca", "ca", None, "{}", 1, now_iso, "default"),
+            ]
+            conn.executemany(
+                "INSERT INTO connectors (name, category, renewal_threshold_days, config, is_active, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                defaults,
+            )
+        conn.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        conn.commit()
+    finally:
+        if close_conn:
+            conn.close()
+
+
 def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
     if db_path is None:
         db_path = os.getenv("CERTOPS_DB_PATH", os.getenv("DB_PATH", "./certops.db"))
     conn = sqlite3.connect(db_path, timeout=10.0)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS certificates (
-            vault_source TEXT NOT NULL,
-            name TEXT NOT NULL,
-            expiry_utc TEXT NOT NULL,
-            version TEXT,
-            common_name TEXT,
-            updated_at TEXT,
-            connector_category TEXT DEFAULT 'secret_store',
-            pipeline_stage TEXT,
-            pending_cert_pem TEXT,
-            pending_cert_key TEXT,
-            PRIMARY KEY (vault_source, name)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS groups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            description TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS maintenance_windows (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER REFERENCES groups(id),
-            start_time TEXT NOT NULL,
-            end_time TEXT NOT NULL,
-            recurrence TEXT DEFAULT 'once'
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS notification_policies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id INTEGER REFERENCES groups(id),
-            threshold_days REAL NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS notification_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vault_source TEXT,
-            cert_id TEXT NOT NULL,
-            policy_id INTEGER REFERENCES notification_policies(id),
-            sent_at TEXT NOT NULL
-        )
-        """
-    )
-    # Idempotent column migrations for existing databases
-    cursor = conn.execute("PRAGMA table_info(certificates)")
-    existing_cols = {row[1] for row in cursor.fetchall()}
-    if "connector_category" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN connector_category TEXT DEFAULT 'secret_store'")
-    if "pipeline_stage" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN pipeline_stage TEXT")
-    if "renewal_threshold_days" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN renewal_threshold_days REAL")
-    if "group_id" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN group_id INTEGER REFERENCES groups(id)")
-    if "next_renewal_at" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN next_renewal_at TEXT")
-    if "next_notification_check_at" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN next_notification_check_at TEXT")
-    if "pending_cert_pem" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN pending_cert_pem TEXT")
-    if "pending_cert_key" not in existing_cols:
-        conn.execute("ALTER TABLE certificates ADD COLUMN pending_cert_key TEXT")
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS renewal_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vault_source TEXT,
-            cert_id TEXT,
-            timestamp TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            connector_category TEXT,
-            connector_type TEXT,
-            old_expiry TEXT,
-            new_expiry TEXT,
-            old_fingerprint TEXT,
-            new_fingerprint TEXT,
-            success BOOLEAN NOT NULL,
-            detail TEXT
-        )
-        """
-    )
-    cursor = conn.execute("PRAGMA table_info(renewal_log)")
-    log_cols = {row[1] for row in cursor.fetchall()}
-    if "vault_source" not in log_cols:
-        conn.execute("ALTER TABLE renewal_log ADD COLUMN vault_source TEXT")
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'viewer',
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS user_invites (
-            token TEXT PRIMARY KEY,
-            email TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'viewer',
-            expires_utc TEXT NOT NULL,
-            used INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS connectors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            category TEXT NOT NULL,
-            renewal_threshold_days REAL NULL,
-            config TEXT NOT NULL DEFAULT '{}',
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        )
-        """
-    )
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS activity_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            actor_user_id INTEGER,
-            actor_email TEXT,
-            target TEXT,
-            details TEXT,
-            timestamp TEXT NOT NULL
-        )
-        """
-    )
-
-    cur = conn.execute("SELECT COUNT(*) FROM connectors")
-    if cur.fetchone()[0] == 0:
-        now_iso = datetime.now(timezone.utc).isoformat()
-        defaults = [
-            ("hashicorp", "secret_store", None, "{}", 1, now_iso),
-            ("azure", "secret_store", None, "{}", 1, now_iso),
-            ("ssh_host", "host", None, "{}", 1, now_iso),
-            ("step_ca", "ca", None, "{}", 1, now_iso),
-        ]
-        conn.executemany(
-            "INSERT INTO connectors (name, category, renewal_threshold_days, config, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            defaults,
-        )
-    conn.commit()
+    run_migrations(conn)
     return conn
+
+
+def bootstrap_default_connectors(db_path: str | None = None) -> None:
+    """
+    Bootstrap default local/stub connectors into SQLite once if the connectors table is empty.
+    Retires parallel env var discovery paths.
+    """
+    conn = get_db_connection(db_path)
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM connectors")
+        if cur.fetchone()[0] == 0:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            defaults = [
+                ("hashicorp", "secret_store", None, "{}", 1, now_iso, "default"),
+                ("azure", "secret_store", None, "{}", 1, now_iso, "default"),
+                ("ssh_host", "host", None, "{}", 1, now_iso, "default"),
+                ("step_ca", "ca", None, "{}", 1, now_iso, "default"),
+            ]
+            conn.executemany(
+                "INSERT INTO connectors (name, category, renewal_threshold_days, config, is_active, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                defaults,
+            )
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def create_user(
     email: str,
     password_hash: str,
     role: str = "viewer",
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "INSERT INTO users (email, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
-            (email, password_hash, role, now_iso),
+            "INSERT INTO users (email, password_hash, role, created_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
+            (email, password_hash, role, now_iso, tenant_id),
         )
         conn.commit()
         return cursor.lastrowid
@@ -235,7 +313,7 @@ def get_user_by_email(email: str, db_path: str | None = None) -> dict[str, Any] 
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "SELECT id, email, password_hash, role, created_at FROM users WHERE email = ?",
+            "SELECT id, email, password_hash, role, created_at, tenant_id FROM users WHERE email = ?",
             (email,),
         )
         row = cursor.fetchone()
@@ -243,14 +321,14 @@ def get_user_by_email(email: str, db_path: str | None = None) -> dict[str, Any] 
         conn.close()
     if not row:
         return None
-    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4]}
+    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4], "tenant_id": row[5] or "default"}
 
 
 def get_user_by_id(user_id: int, db_path: str | None = None) -> dict[str, Any] | None:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "SELECT id, email, password_hash, role, created_at FROM users WHERE id = ?",
+            "SELECT id, email, password_hash, role, created_at, tenant_id FROM users WHERE id = ?",
             (user_id,),
         )
         row = cursor.fetchone()
@@ -258,7 +336,7 @@ def get_user_by_id(user_id: int, db_path: str | None = None) -> dict[str, Any] |
         conn.close()
     if not row:
         return None
-    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4]}
+    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4], "tenant_id": row[5] or "default"}
 
 
 def create_invite(
@@ -329,21 +407,39 @@ def mark_invite_used(token: str, db_path: str | None = None) -> bool:
 
 # ─── Connector Credential Encryption & Redaction ─────────────────────────────
 
+_EPHEMERAL_DEV_FERNET_KEY = Fernet.generate_key()
+
+
 def _get_fernet() -> Fernet:
     raw_key = os.getenv("CERTOPS_CONFIG_ENCRYPTION_KEY")
     if raw_key:
         try:
             return Fernet(raw_key.encode("utf-8"))
         except Exception as e:
-            logger.warning("CERTOPS_CONFIG_ENCRYPTION_KEY is set but invalid (%s). Falling back to JWT_SECRET-derived key (DEPRECATED).", e)
+            msg = (
+                "\n"
+                "********************************************************************************\n"
+                f"CRITICAL SECURITY / CONFIG ERROR: CERTOPS_CONFIG_ENCRYPTION_KEY is invalid: {e}\n"
+                "Cannot initialize Fernet encryption key.\n"
+                "********************************************************************************\n"
+            )
+            logger.critical(msg)
+            print(msg, file=sys.stderr)
+            raise ValueError(f"Invalid CERTOPS_CONFIG_ENCRYPTION_KEY provided: {e}") from e
     else:
-        logger.warning(
-            "CRITICAL SECURITY WARNING: CERTOPS_CONFIG_ENCRYPTION_KEY is not set. "
-            "Falling back to deriving encryption key from JWT_SECRET (DEPRECATED and insecure for production)."
+        msg = (
+            "\n"
+            "********************************************************************************\n"
+            "CRITICAL SECURITY WARNING: CERTOPS_CONFIG_ENCRYPTION_KEY is not set!\n"
+            "Using an ephemeral in-memory Fernet key for local dev convenience.\n"
+            "Encrypted credentials will NOT persist across process restarts.\n"
+            "Do NOT use in production! Generate a key with:\n"
+            '  python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"\n'
+            "********************************************************************************\n"
         )
-    secret = os.getenv("JWT_SECRET", "certops-dev-encryption-key-do-not-use-in-prod").encode("utf-8")
-    derived = base64.urlsafe_b64encode(hashlib.sha256(secret).digest())
-    return Fernet(derived)
+        logger.warning(msg)
+        print(msg, file=sys.stderr)
+        return Fernet(_EPHEMERAL_DEV_FERNET_KEY)
 
 
 _SENSITIVE_KEY_SUBSTRINGS = ("token", "password", "secret", "key", "pass")
@@ -400,14 +496,18 @@ def redact_config(config_obj: dict[str, Any] | str) -> dict[str, Any]:
     return out
 
 
-def list_connectors(active_only: bool = False, db_path: str | None = None) -> list[dict[str, Any]]:
+def list_connectors(active_only: bool = False, tenant_id: str | None = None, db_path: str | None = None) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
-        query = "SELECT id, name, category, renewal_threshold_days, config, is_active, created_at FROM connectors"
+        query = "SELECT id, name, category, renewal_threshold_days, config, is_active, created_at, tenant_id FROM connectors WHERE 1=1"
+        params: list[Any] = []
         if active_only:
-            query += " WHERE is_active = 1"
+            query += " AND is_active = 1"
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
         query += " ORDER BY name ASC"
-        rows = conn.execute(query).fetchall()
+        rows = conn.execute(query, params).fetchall()
     finally:
         conn.close()
     default_thresh = float(os.getenv("RENEWAL_THRESHOLD_DAYS", "2"))
@@ -420,18 +520,21 @@ def list_connectors(active_only: bool = False, db_path: str | None = None) -> li
             "config": r[4],
             "is_active": bool(r[5]),
             "created_at": r[6],
+            "tenant_id": r[7] if len(r) > 7 else "default",
         }
         for r in rows
     ]
 
 
-def get_connector(connector_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+def get_connector(connector_id: int, db_path: str | None = None, tenant_id: str | None = None) -> dict[str, Any] | None:
     conn = get_db_connection(db_path)
     try:
-        r = conn.execute(
-            "SELECT id, name, category, renewal_threshold_days, config, is_active, created_at FROM connectors WHERE id = ?",
-            (connector_id,),
-        ).fetchone()
+        query = "SELECT id, name, category, renewal_threshold_days, config, is_active, created_at, tenant_id FROM connectors WHERE id = ?"
+        params: list[Any] = [connector_id]
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
+        r = conn.execute(query, params).fetchone()
     finally:
         conn.close()
     if not r:
@@ -445,16 +548,19 @@ def get_connector(connector_id: int, db_path: str | None = None) -> dict[str, An
         "config": r[4],
         "is_active": bool(r[5]),
         "created_at": r[6],
+        "tenant_id": r[7] if len(r) > 7 else "default",
     }
 
 
-def get_connector_by_name(name: str, db_path: str | None = None) -> dict[str, Any] | None:
+def get_connector_by_name(name: str, db_path: str | None = None, tenant_id: str | None = None) -> dict[str, Any] | None:
     conn = get_db_connection(db_path)
     try:
-        r = conn.execute(
-            "SELECT id, name, category, renewal_threshold_days, config, is_active, created_at FROM connectors WHERE name = ?",
-            (name,),
-        ).fetchone()
+        query = "SELECT id, name, category, renewal_threshold_days, config, is_active, created_at, tenant_id FROM connectors WHERE name = ?"
+        params: list[Any] = [name]
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
+        r = conn.execute(query, params).fetchone()
     finally:
         conn.close()
     if not r:
@@ -468,6 +574,7 @@ def get_connector_by_name(name: str, db_path: str | None = None) -> dict[str, An
         "config": r[4],
         "is_active": bool(r[5]),
         "created_at": r[6],
+        "tenant_id": r[7] if len(r) > 7 else "default",
     }
 
 
@@ -487,6 +594,7 @@ def create_connector(
     renewal_threshold_days: float,
     config: str = "{}",
     is_active: bool = True,
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -494,8 +602,8 @@ def create_connector(
     conn = get_db_connection(db_path)
     try:
         cur = conn.execute(
-            "INSERT INTO connectors (name, category, renewal_threshold_days, config, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (name, category, float(renewal_threshold_days), encrypted_cfg, 1 if is_active else 0, now_iso),
+            "INSERT INTO connectors (name, category, renewal_threshold_days, config, is_active, created_at, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (name, category, float(renewal_threshold_days), encrypted_cfg, 1 if is_active else 0, now_iso, tenant_id),
         )
         conn.commit()
         cid = cur.lastrowid
@@ -571,6 +679,7 @@ def upsert_certificate(
     group_id: int | None = None,
     next_renewal_at: Any | None = None,
     next_notification_check_at: Any | None = None,
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> None:
     """
@@ -596,9 +705,9 @@ def upsert_certificate(
             INSERT INTO certificates (
                 vault_source, name, expiry_utc, version, common_name,
                 connector_category, pipeline_stage, renewal_threshold_days, group_id,
-                next_renewal_at, next_notification_check_at, updated_at
+                next_renewal_at, next_notification_check_at, updated_at, tenant_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(vault_source, name) DO UPDATE SET
                 expiry_utc=excluded.expiry_utc,
                 version=excluded.version,
@@ -609,7 +718,8 @@ def upsert_certificate(
                 group_id=COALESCE(excluded.group_id, certificates.group_id),
                 next_renewal_at=excluded.next_renewal_at,
                 next_notification_check_at=COALESCE(excluded.next_notification_check_at, certificates.next_notification_check_at),
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                tenant_id=COALESCE(excluded.tenant_id, certificates.tenant_id)
             """,
             (
                 vault_source,
@@ -624,6 +734,7 @@ def upsert_certificate(
                 next_ren_iso,
                 next_notif_iso,
                 now_iso,
+                tenant_id,
             ),
         )
         conn.commit()
@@ -661,6 +772,7 @@ def get_due_certificates(
     threshold_days: float | None = None,
     connector_category: str | None = None,
     group_id: int | None = None,
+    tenant_id: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """
@@ -687,6 +799,9 @@ def get_due_certificates(
         if group_id is not None:
             query += " AND group_id = ?"
             params.append(group_id)
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
 
         cursor = conn.execute(query, params)
         rows = cursor.fetchall()
@@ -768,20 +883,22 @@ def clear_pending_cert(
 
 
 def get_certificate(
-    vault_source: str, name: str, db_path: str | None = None
+    vault_source: str, name: str, db_path: str | None = None, tenant_id: str | None = None
 ) -> dict[str, Any] | None:
     conn = get_db_connection(db_path)
     try:
-        cursor = conn.execute(
-            """
+        query = """
             SELECT vault_source, name, expiry_utc, version, common_name,
                    connector_category, pipeline_stage, renewal_threshold_days, group_id,
-                   next_renewal_at, next_notification_check_at, pending_cert_pem, pending_cert_key
+                   next_renewal_at, next_notification_check_at, pending_cert_pem, pending_cert_key, tenant_id
             FROM certificates
             WHERE vault_source = ? AND name = ?
-            """,
-            (vault_source, name),
-        )
+        """
+        params: list[Any] = [vault_source, name]
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
+        cursor = conn.execute(query, params)
         row = cursor.fetchone()
     finally:
         conn.close()
@@ -802,6 +919,7 @@ def get_certificate(
         "next_notification_check_at": _parse_utc_datetime(row[10]) if row[10] else None,
         "pending_cert_pem": row[11] if len(row) > 11 else None,
         "pending_cert_key": row[12] if len(row) > 12 else None,
+        "tenant_id": row[13] if len(row) > 13 else "default",
     }
 
 
@@ -934,12 +1052,15 @@ def is_group_in_maintenance_window(
     return False
 
 
-def list_all_certificates(db_path: str | None = None) -> list[dict[str, Any]]:
+def list_all_certificates(db_path: str | None = None, tenant_id: str | None = None) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
-        cursor = conn.execute(
-            "SELECT vault_source, name, expiry_utc, version, common_name, connector_category, pipeline_stage, renewal_threshold_days, group_id, next_renewal_at, next_notification_check_at FROM certificates"
-        )
+        query = "SELECT vault_source, name, expiry_utc, version, common_name, connector_category, pipeline_stage, renewal_threshold_days, group_id, next_renewal_at, next_notification_check_at, tenant_id FROM certificates"
+        params: list[Any] = []
+        if tenant_id is not None:
+            query += " WHERE tenant_id = ?"
+            params.append(tenant_id)
+        cursor = conn.execute(query, params)
         rows = cursor.fetchall()
     finally:
         conn.close()
@@ -956,6 +1077,7 @@ def list_all_certificates(db_path: str | None = None) -> list[dict[str, Any]]:
             "group_id": r[8],
             "next_renewal_at": _parse_utc_datetime(r[9]) if r[9] else None,
             "next_notification_check_at": _parse_utc_datetime(r[10]) if r[10] else None,
+            "tenant_id": r[11] if len(r) > 11 else "default",
         }
         for r in rows
     ]

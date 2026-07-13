@@ -44,15 +44,18 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def _make_token(user_id: int, email: str, role: str) -> str:
+def _make_token(user_id: int, email: str, role: str, tenant_id: str = "default") -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS)
-    payload = {"sub": str(user_id), "email": email, "role": role, "exp": expire}
+    payload = {"sub": str(user_id), "email": email, "role": role, "tenant_id": tenant_id, "exp": expire}
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def _decode_token(token: str) -> dict:
     try:
-        return pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        data = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if "tenant_id" not in data:
+            data["tenant_id"] = "default"
+        return data
     except pyjwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except pyjwt.InvalidTokenError:
@@ -92,10 +95,11 @@ def login(body: LoginRequest, response: Response):
     user = db.get_user_by_email(body.email)
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    token = _make_token(user["id"], user["email"], user["role"])
+    tid = user.get("tenant_id") or "default"
+    token = _make_token(user["id"], user["email"], user["role"], tenant_id=tid)
     response.set_cookie(COOKIE_NAME, token, **_cookie_kwargs())
     db.log_activity(event_type="user_login", actor_user_id=user["id"], actor_email=user["email"])
-    return {"id": user["id"], "email": user["email"], "role": user["role"]}
+    return {"id": user["id"], "email": user["email"], "role": user["role"], "tenant_id": tid}
 
 
 @router.get("/auth/me")

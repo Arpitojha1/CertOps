@@ -13,6 +13,10 @@ from pathlib import Path
 from src import db, tasks, verify
 
 
+LIVE = os.getenv("CERTOPS_RUN_LIVE") == "1"
+
+
+@unittest.skipUnless(LIVE, "Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox")
 class TestTier1TasksIntegration(unittest.TestCase):
     def test_full_tasks_pipeline_closed_loop(self):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:

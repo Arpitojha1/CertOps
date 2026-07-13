@@ -102,12 +102,16 @@ function formatDetails(details: string | null): string | null {
   try {
     const parsed = JSON.parse(details);
     const parts: string[] = [];
+    if (parsed.source === "renewal-log") parts.push("[renewal pipeline]");
+    if (parsed.connector || parsed.connector_name) parts.push(parsed.connector || parsed.connector_name);
     if (parsed.name) parts.push(parsed.name);
     if (parsed.email && !parts.includes(parsed.email)) parts.push(parsed.email);
     if (parsed.category) parts.push(parsed.category);
+    if (parsed.old_expiry && parsed.new_expiry) parts.push(`renewed: ${parsed.old_expiry} -> ${parsed.new_expiry}`);
     if (parsed.threshold_days) parts.push(`${parsed.threshold_days}d threshold`);
     if (parsed.role) parts.push(`role: ${parsed.role}`);
     if (parsed.group_id !== undefined) parts.push(`group #${parsed.group_id}`);
+    if (parsed.detail) parts.push(parsed.detail);
     return parts.length > 0 ? parts.join(" - ") : null;
   } catch {
     return details;
@@ -134,15 +138,42 @@ export default function ActivityPage() {
       if (eventTypeFilter !== "all") params.set("event_type", eventTypeFilter);
 
       try {
-        const res = await api.get<ActivityLogResponse>(
-          `/api/activity-log?${params.toString()}`
+        const [resAct, resRen] = await Promise.all([
+          api.get<ActivityLogResponse>(`/api/activity-log?${params.toString()}`),
+          api.get<any[]>("/api/renewal-log").catch(() => ({ data: [] })),
+        ]);
+
+        const renItems: ActivityEntry[] = (resRen.data || []).map((item: any) => ({
+          id: -(item.id || 0) - 1000,
+          event_type: item.event_type || "certificate_renewed",
+          actor_user_id: null,
+          actor_email: "system (renewal pipeline)",
+          target: item.cert_id || item.vault_source || "Certificate",
+          details: JSON.stringify({
+            source: "renewal-log",
+            connector: item.vault_source,
+            category: item.connector_category,
+            old_expiry: item.old_expiry,
+            new_expiry: item.new_expiry,
+            success: item.success,
+            detail: item.detail,
+          }),
+          timestamp: item.timestamp || new Date().toISOString(),
+        }));
+
+        const actItems = resAct.data.items || [];
+        const existingIds = new Set(actItems.map(i => `${i.timestamp}-${i.target}`));
+        const filteredRen = renItems.filter(r => !existingIds.has(`${r.timestamp}-${r.target}`));
+        const merged = [...actItems, ...filteredRen].sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
         );
+
         if (append) {
-          setItems(prev => [...prev, ...res.data.items]);
+          setItems(prev => [...prev, ...merged]);
         } else {
-          setItems(res.data.items);
+          setItems(merged);
         }
-        setTotal(res.data.total);
+        setTotal((resAct.data.total || 0) + filteredRen.length);
       } catch {
         setError("Failed to load activity log.");
       } finally {

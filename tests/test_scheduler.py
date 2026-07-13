@@ -69,8 +69,8 @@ class TestPhase34Scheduler(unittest.TestCase):
         self.assertGreater(seconds_until, 86400)
         print(f"[VERIFIED] Far-future certificate sleeps for {seconds_until:.1f}s with zero polling activity.")
 
-        # 2. Test restart recovery with an imminent job (~1.2s in future)
-        imminent_next = datetime.now(timezone.utc) + timedelta(seconds=1.2)
+        # 2. Test restart recovery with an imminent job (~0.1s in future)
+        imminent_next = datetime.now(timezone.utc) + timedelta(seconds=0.1)
         db.upsert_certificate(
             "hashicorp",
             "cert-imminent-01",
@@ -92,8 +92,8 @@ class TestPhase34Scheduler(unittest.TestCase):
         print("Starting restarted scheduler and waiting for scheduled event...")
         sched_restarted.start()
 
-        # Wait for scheduler to hit next_renewal_at and fire (polling up to 5s)
-        deadline = time.time() + 5.0
+        # Wait for scheduler to hit next_renewal_at and fire (polling up to 3s)
+        deadline = time.time() + 3.0
         while not fired_jobs and time.time() < deadline:
             time.sleep(0.05)
         sched_restarted.stop()

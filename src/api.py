@@ -18,16 +18,22 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import logging
+
 if __package__ is None or __package__ == "":
     import auth
     import db
     import main as main_module
     from auth import get_current_user, require_admin
+    from scheduler import RenewalScheduler
 else:
     from . import auth, db, main as main_module
     from .auth import get_current_user, require_admin
+    from .scheduler import RenewalScheduler
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="CertOps API")
 
@@ -42,6 +48,27 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+def _event_driven_scheduler_callback() -> None:
+    logger.info("RenewalScheduler due job detected; Celery Beat owns actual triggering.")
+
+
+@app.on_event("startup")
+def startup_bootstrap() -> None:
+    db.run_migrations()
+    db.bootstrap_default_connectors()
+    sched = RenewalScheduler(job_callback=_event_driven_scheduler_callback)
+    sched.start()
+    app.state.scheduler = sched
+
+
+@app.on_event("shutdown")
+def shutdown_cleanup() -> None:
+    sched = getattr(app.state, "scheduler", None)
+    if sched is not None:
+        sched.stop()
+
 
 # Auth routes (login/me/logout/signup) — mounted at root level so /auth/* works
 app.include_router(auth.router)
@@ -105,13 +132,20 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _get_tenant_scope(current_user: dict) -> str | None:
+    if current_user.get("role") == "admin":
+        return None
+    return current_user.get("tenant_id", "default")
+
+
 # ─── certificates ─────────────────────────────────────────────────────────────
 
 @app.get("/api/certificates")
-def list_certificates(_: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
+def list_certificates(current_user: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
     now_utc = datetime.now(timezone.utc)
     group_names = {g["id"]: g["name"] for g in db.list_groups()}
-    return [_serialize_cert(c, group_names, now_utc) for c in db.list_all_certificates()]
+    scope = _get_tenant_scope(current_user)
+    return [_serialize_cert(c, group_names, now_utc) for c in db.list_all_certificates(tenant_id=scope)]
 
 
 @app.get("/api/certificates/due")
@@ -119,17 +153,19 @@ def list_due_certificates(
     threshold_days: float | None = Query(default=None),
     vault_source: str | None = Query(default=None),
     group_id: int | None = Query(default=None),
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
     now_utc = datetime.now(timezone.utc)
     group_names = {g["id"]: g["name"] for g in db.list_groups()}
-    due = db.get_due_certificates(vault_source=vault_source, threshold_days=threshold_days, group_id=group_id)
+    scope = _get_tenant_scope(current_user)
+    due = db.get_due_certificates(vault_source=vault_source, threshold_days=threshold_days, group_id=group_id, tenant_id=scope)
     return [_serialize_cert(c, group_names, now_utc) for c in due]
 
 
 @app.get("/api/certificates/{vault_source}/{name}")
-def get_certificate(vault_source: str, name: str, _: dict = Depends(get_current_user)) -> dict[str, Any]:
-    cert = db.get_certificate(vault_source, name)
+def get_certificate(vault_source: str, name: str, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    scope = _get_tenant_scope(current_user)
+    cert = db.get_certificate(vault_source, name, tenant_id=scope)
     if cert is None:
         raise HTTPException(status_code=404, detail="Certificate not found")
     now_utc = datetime.now(timezone.utc)
@@ -161,15 +197,49 @@ def get_activity_log(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     event_type: str | None = Query(default=None),
+    include_renewal_log: bool = Query(default=True),
     current_user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     is_admin = current_user.get("role") == "admin"
-    return db.get_activity_logs(
-        limit=limit,
-        offset=offset,
+    res = db.get_activity_logs(
+        limit=max(limit + offset, 500) if include_renewal_log else limit,
+        offset=0 if include_renewal_log else offset,
         event_type=event_type,
         admin_only=is_admin,
     )
+    items = list(res["items"])
+    total = res["total"]
+
+    if include_renewal_log:
+        ren_logs = db.get_renewal_logs()
+        for row in ren_logs:
+            et = row.get("event_type") or "certificate_renewed"
+            if event_type is not None and et != event_type:
+                continue
+            ren_item = {
+                "id": -(int(row.get("id", 0)) + 100000),
+                "event_type": et,
+                "actor_user_id": None,
+                "actor_email": "system (renewal pipeline)",
+                "target": row.get("cert_id") or row.get("vault_source") or "Certificate",
+                "details": json.dumps({
+                    "source": "renewal_log",
+                    "connector": row.get("vault_source"),
+                    "category": row.get("connector_category"),
+                    "old_expiry": row.get("old_expiry"),
+                    "new_expiry": row.get("new_expiry"),
+                    "success": row.get("success"),
+                    "detail": row.get("detail"),
+                }),
+                "timestamp": str(row.get("timestamp") or ""),
+            }
+            items.append(ren_item)
+
+        items.sort(key=lambda x: str(x.get("timestamp") or ""), reverse=True)
+        total = len(items)
+        items = items[offset : offset + limit]
+
+    return {"items": items, "total": total}
 
 
 # ─── connectors ───────────────────────────────────────────────────────────────
@@ -209,9 +279,10 @@ class UpdateConnectorRequest(BaseModel):
 @app.get("/api/connectors")
 def list_connectors(
     active_only: bool = Query(default=False),
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    rows = db.list_connectors(active_only=active_only)
+    scope = _get_tenant_scope(current_user)
+    rows = db.list_connectors(active_only=active_only, tenant_id=scope)
     return [_serialize_connector(r) for r in rows]
 
 
@@ -473,7 +544,7 @@ def get_notification_log(
 def scheduler_status(_: dict = Depends(get_current_user)) -> dict[str, Any]:
     """
     Derives scheduler state from certificates.next_renewal_at and recent renewal_log rows.
-    No live scheduler process handle exists in this HTTP process.
+    Also exposes whether the in-process event-driven RenewalScheduler thread is running.
     """
     now_utc = datetime.now(timezone.utc)
     certs = db.list_all_certificates()
@@ -483,7 +554,14 @@ def scheduler_status(_: dict = Depends(get_current_user)) -> dict[str, Any]:
     )
     next_job = upcoming[0] if upcoming else None
     recent_events = db.get_renewal_logs()[-20:]
+    sched = getattr(app.state, "scheduler", None)
+    is_running = bool(
+        sched is not None
+        and getattr(sched, "_worker_thread", None) is not None
+        and sched._worker_thread.is_alive()
+    )
     return {
+        "isRunning": is_running,
         "nextJob": {
             "vaultSource": next_job["vault_source"],
             "name": next_job["name"],

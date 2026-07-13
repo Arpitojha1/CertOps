@@ -450,8 +450,41 @@ class TestGate4ActivityLog(unittest.TestCase):
         )
         fail_targets = [e["target"] for e in resp_fail.json()["items"] if e["target"] == "stub-cert"]
         self.assertEqual(fail_targets, [], "No certificate_renewal_failed should exist for stub-cert")
-        print("[NO FAILURE] No certificate_renewal_failed entry — renewal succeeded cleanly")
         print("[RESULT] PASSED: run_renewal_loop() logs certificate_renewed with ISO timestamps via real code path")
+
+    def test_09_renewal_log_entries_appear_in_combined_activity_feed(self):
+        """
+        Regression test asserting renewal-log entries surface in the combined activity feed alongside RBAC activity entries.
+        """
+        print("\n=== TEST 9: Renewal-Log Entries Appear in Combined Activity Feed ===")
+        # 1. Log an RBAC/access event directly into activity_log
+        db.log_activity("connector_created", actor_email="admin@certops.internal", target="test_rbac_connector")
+
+        # 2. Log a renewal pipeline event directly into renewal_log (only in renewal_log, not activity_log)
+        db.insert_renewal_log(
+            cert_id="cert_from_renewal_log",
+            event_type="certificate_renewed",
+            success=True,
+            vault_source="hashicorp",
+            detail="renewed directly via insert_renewal_log",
+        )
+
+        # 3. Query combined activity log endpoint
+        resp = self.client.get("/api/activity-log?limit=200", cookies=self.admin_cookie)
+        self.assertEqual(resp.status_code, 200)
+        items = resp.json()["items"]
+
+        # 4. Assert both RBAC event and renewal log event are present together
+        rbac_targets = [item for item in items if item.get("target") == "test_rbac_connector"]
+        ren_targets = [item for item in items if item.get("target") == "cert_from_renewal_log"]
+
+        self.assertGreaterEqual(len(rbac_targets), 1, "Must contain RBAC/access event from activity_log")
+        self.assertGreaterEqual(len(ren_targets), 1, "Must contain renewal event from renewal_log")
+
+        print("[COMBINED LOG VERIFICATION] Both RBAC activity_log and renewal_log entries found together:")
+        print("  RBAC entry sample:", json.dumps(rbac_targets[0], indent=2))
+        print("  Renewal-log entry sample:", json.dumps(ren_targets[0], indent=2))
+        print("[RESULT] PASSED: Combined activity log returns both data sources together")
 
 
 if __name__ == "__main__":

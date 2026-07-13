@@ -140,7 +140,8 @@ class SSHHostConnector(HostConnector):
         return client
 
     def _exec_command(self, client: paramiko.SSHClient, cmd: str) -> tuple[int, str, str]:
-        stdin, stdout, stderr = client.exec_command(cmd, timeout=10)
+        _t = float(os.getenv("SSH_TIMEOUT_SECONDS", "10"))
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=_t)
         exit_status = stdout.channel.recv_exit_status()
         out_str = stdout.read().decode("utf-8", errors="replace")
         err_str = stderr.read().decode("utf-8", errors="replace")

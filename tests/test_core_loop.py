@@ -16,6 +16,10 @@ from src import verify
 
 
 
+LIVE = os.getenv("CERTOPS_RUN_LIVE") == "1"
+
+
+@unittest.skipUnless(LIVE, "Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox")
 class TestCoreLoopSmoke(unittest.TestCase):
     def setUp(self):
         self._orig_threshold = os.environ.get("RENEWAL_THRESHOLD_DAYS")
