@@ -126,15 +126,16 @@ class SSHHostConnector(HostConnector):
     def _get_ssh_client(self) -> paramiko.SSHClient:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        _t = float(os.getenv("SSH_TIMEOUT_SECONDS", "10"))
         client.connect(
             hostname=self.hostname,
             port=self.port,
             username=self.username,
             password=self.password,
             key_filename=self.key_filename,
-            timeout=10,
-            banner_timeout=10,
-            auth_timeout=10,
+            timeout=_t,
+            banner_timeout=_t,
+            auth_timeout=_t,
         )
         return client
 

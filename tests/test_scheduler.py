@@ -92,8 +92,10 @@ class TestPhase34Scheduler(unittest.TestCase):
         print("Starting restarted scheduler and waiting for scheduled event...")
         sched_restarted.start()
 
-        # Wait ~2 seconds for scheduler to hit next_renewal_at and fire
-        time.sleep(2.2)
+        # Wait for scheduler to hit next_renewal_at and fire (polling up to 5s)
+        deadline = time.time() + 5.0
+        while not fired_jobs and time.time() < deadline:
+            time.sleep(0.05)
         sched_restarted.stop()
 
         self.assertGreaterEqual(len(fired_jobs), 1)

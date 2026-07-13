@@ -2,11 +2,36 @@ import json
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from src import api, db
 from src.api import app
 from src.host_connector import SSHHostConnector
+
+
+def _make_self_signed_pem() -> str:
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from datetime import datetime, timedelta, timezone
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "local.test")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=825))
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.PEM).decode("utf-8")
+
 
 
 class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
@@ -281,8 +306,8 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
         self.assertEqual(resp_block.status_code, 409)
         self.assertIn("certificate(s) are currently tracked under this connector", resp_block.json()["detail"])
 
-    def test_05_credential_encryption_roundtrip_live_ssh_connection(self):
-        print("\n=== TEST 5: Credential Encryption Round-Trip & Live SSH Host Authentication ===")
+    def test_05_credential_encryption_roundtrip_and_decrypted_creds_used(self):
+        print("\n=== TEST 5: Credential Encryption Round-Trip & Decrypted Creds Reach SSH Transport (mocked) ===")
         resp = self.client.post(
             "/api/connectors",
             json={
@@ -290,10 +315,10 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
                 "category": "host",
                 "renewal_threshold_days": 30.0,
                 "config": {
-                    "hostname": os.getenv("SSH_HOST", "localhost"),
-                    "port": int(os.getenv("SSH_PORT", "2222")),
-                    "username": os.getenv("SSH_USERNAME", "root"),
-                    "password": os.getenv("SSH_PASSWORD", "certops"),
+                    "hostname": "test-host.invalid",
+                    "port": 2222,
+                    "username": "root",
+                    "password": "certops",
                     "nginx_conf_dir": "/etc/nginx/certs",
                 },
             },
@@ -302,6 +327,7 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         cid = resp.json()["id"]
 
+        # 5A. Ciphertext at rest
         conn = db.get_db_connection(self.db_path)
         try:
             raw_cfg_str = conn.execute("SELECT config FROM connectors WHERE id = ?", (cid,)).fetchone()[0]
@@ -311,15 +337,48 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
         self.assertIn("ENC:v1:", raw_cfg_str)
         self.assertNotIn("certops", raw_cfg_str)
 
+        # 5B. Decryption round-trip
         db_connector = db.get_connector(cid, db_path=self.db_path)
         decrypted_cfg = db.decrypt_config(db_connector["config"])
         print(f"[5B. DECRYPTED CONFIG FOR BACKEND RUNTIME] password='{decrypted_cfg['password']}'")
         self.assertEqual(decrypted_cfg["password"], "certops")
 
-        ssh_connector = SSHHostConnector.from_config(decrypted_cfg)
-        discovered = ssh_connector.discover_certificates()
-        print(f"[5C. LIVE ROUND-TRIP DISCOVERED CERTS VIA SSH] {discovered}")
-        self.assertGreaterEqual(len(discovered), 1, "Must successfully discover host certs using decrypted SSH credentials!")
+        # 5C. Prove the DECRYPTED creds are what the connector would use, WITHOUT any live host.
+        #     Mock paramiko.SSHClient so discover_certificates() runs fully offline.
+        fake_pem = _make_self_signed_pem()  # in-memory, no disk, no network, no real certs
+
+        mock_client = MagicMock()
+        # exec_command -> (stdin, stdout, stderr); stdout yields the nginx ssl_certificate line
+        def _fake_exec(cmd, timeout=None):
+            out = MagicMock()
+            if "ssl_certificate_key" in cmd:
+                out.read.return_value = b""
+            elif "ssl_certificate" in cmd:
+                out.read.return_value = b"/etc/nginx/certs/local.conf:1:    ssl_certificate /etc/nginx/certs/local.crt;\n"
+            else:
+                out.read.return_value = b""
+            out.channel.recv_exit_status.return_value = 0
+            err = MagicMock(); err.read.return_value = b""
+            return (MagicMock(), out, err)
+        mock_client.exec_command.side_effect = _fake_exec
+
+        # SFTP file read -> our in-memory PEM
+        fake_file = MagicMock()
+        fake_file.read.return_value = fake_pem.encode("utf-8")
+        fake_file.__enter__ = lambda s: fake_file
+        fake_file.__exit__ = lambda s, *a: False
+        mock_client.open_sftp.return_value.open.return_value = fake_file
+
+        with patch("src.host_connector.paramiko.SSHClient", return_value=mock_client):
+            ssh_connector = SSHHostConnector.from_config(decrypted_cfg)
+            discovered = ssh_connector.discover_certificates()
+
+        # The decrypted password must have been passed to the transport
+        _, connect_kwargs = mock_client.connect.call_args
+        self.assertEqual(connect_kwargs.get("password"), "certops")
+        print(f"[5C. MOCKED ROUND-TRIP DISCOVERED CERTS] {discovered}")
+        self.assertGreaterEqual(len(discovered), 1,
+                                "Must discover host cert using decrypted SSH credentials (mocked transport)!")
 
 
 if __name__ == "__main__":

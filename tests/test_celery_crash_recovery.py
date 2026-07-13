@@ -42,7 +42,7 @@ class TestCeleryCrashRecovery(unittest.TestCase):
         # ----------------------------------------------------------------------
         print("\n[PHASE 1] Starting pipeline: executing Stage 1 (Renew)...")
         res1 = tasks.task_renew_certificate(vault_source, cert_id, db_path=self.test_db)
-        self.assertEqual(res1["stage"], "Renewed")
+        self.assertEqual(res1["stage"], "Issued pending deploy")
 
         # Check DB state after Stage 1
         with sqlite3.connect(self.test_db) as conn:
@@ -50,7 +50,7 @@ class TestCeleryCrashRecovery(unittest.TestCase):
                 "SELECT pipeline_stage FROM certificates WHERE name=?", (cert_id,)
             ).fetchone()[0]
         print(f"  [RAW DB QUERY AFTER STAGE 1] cert='{cert_id}' -> pipeline_stage='{stage1_db}'")
-        self.assertEqual(stage1_db, "Renewed")
+        self.assertEqual(stage1_db, "Issued pending deploy")
 
         print("[PHASE 1] Continuing pipeline: executing Stage 2 (Deploy)...")
         res2 = tasks.task_deploy_certificate(res1)

@@ -24,6 +24,10 @@ from dotenv import load_dotenv
 
 
 def test_audit_log_smoke():
+    import os
+    if os.getenv("CERTOPS_RUN_LIVE") != "1":
+        import unittest
+        raise unittest.SkipTest("Live integration smoke test; set CERTOPS_RUN_LIVE=1 to run in a sandbox")
     load_dotenv()
     orig_thresh = os.environ.get("RENEWAL_THRESHOLD_DAYS")
     orig_db = os.environ.get("DB_PATH")
