@@ -21,10 +21,11 @@ if __package__ is None or __package__ == "":
     import ca_client
     import db
     import host_connector
+    import notifier
     import vault_client
     import verify
 else:
-    from . import azurekeyvault, ca_client, db, host_connector, vault_client, verify
+    from . import azurekeyvault, ca_client, db, host_connector, notifier, vault_client, verify
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -301,6 +302,12 @@ def run_notification_check(db_path: str | None = None) -> int:
         for p in policies:
             if remaining_days <= p["threshold_days"]:
                 if not db.has_notification_been_sent(c["name"], p["id"], db_path=db_path):
+                    notifier.dispatch_notification(
+                        cert_name=c["name"],
+                        vault_source=c["vault_source"],
+                        remaining_days=remaining_days,
+                        threshold_days=p["threshold_days"],
+                    )
                     print(
                         f"[NOTIFICATION DELIVERED] Certificate '{c['name']}' lifetime ({remaining_days:.2f}d) "
                         f"<= Policy threshold ({p['threshold_days']}d). Logging notification."
