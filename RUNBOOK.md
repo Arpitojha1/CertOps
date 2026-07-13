@@ -88,3 +88,146 @@ Once steps 1–4 all check out clean, `main.py`'s renewal loop is safe to run li
 - `step-ca` must be started manually every session; it is not part of `docker compose up`.
 - **`step-ca` Badger database recovery after unclean shutdown**: If `step-ca` is terminated forcefully without graceful shutdown, its Badger v2 database (`C:\Users\Arpit\.step\db\000000.vlog`) may remain pre-allocated at 2GB un-truncated. Ensure `"badgerValueLogTruncate": true` is set under `"db"` in `C:\Users\Arpit\.step\config\ca.json` so Badger automatically truncates uncommitted trailing bytes on startup rather than refusing to start.
 - If a fresh terminal window doesn't have the right Python on PATH, confirm with `where python` / `Get-Command python` before assuming a script failure is a code issue rather than an environment issue.
+
+---
+
+## step-ca `.vlog` corruption after unclean shutdown
+
+### Symptom
+`step-ca` fails to start with an error referencing Badger database corruption,
+or hangs indefinitely. The file `C:\Users\Arpit\.step\db\000000.vlog` is
+pre-allocated at 2GB but contains only partial data.
+
+### Likely cause
+`step-ca` uses Badger v2 as its internal database. When `step-ca` is killed
+(force-closed, SIGKILL, machine crash, or closing the terminal window without
+graceful shutdown), Badger's value log file may not be truncated to its actual
+content length. The next startup sees a 2GB file with garbage at the end and
+refuses to operate.
+
+### Recovery steps
+
+1. **Stop `step-ca`** if it's still running (or confirm it's dead).
+
+2. **Check the Badger config** in `C:\Users\Arpit\.step\config\ca.json`:
+   ```json
+   {
+     "db": {
+       "badgerValueLogTruncate": true
+     }
+   }
+   ```
+   If this key is missing or `false`, add/set it to `true`. This tells Badger
+   to automatically truncate uncommitted trailing bytes on startup.
+
+3. **Restart `step-ca`** with the corrected config. If Badger auto-truncates
+   successfully, `step-ca` should start normally.
+
+4. **If auto-truncation fails** (still won't start):
+   - Back up the entire `C:\Users\Arpit\.step\db\` directory.
+   - Delete the `.vlog` file (`000000.vlog`).
+   - Restart `step-ca`. Badger will recreate the log file from the manifest.
+   - **Warning:** this may lose the most recent uncommitted certificate issuance
+     records. Certificates already issued and returned to the caller are not
+     affected (they exist in the certificate files and Vault/secret store).
+
+5. **Verify** `step-ca` is serving:
+   ```powershell
+   curl.exe -k https://localhost:8443/health
+   ```
+   A 200 response confirms recovery.
+
+### Prevention
+Always shut down `step-ca` gracefully (Ctrl+C in its terminal window, not
+closing the window). The `badgerValueLogTruncate: true` config is the safety
+net, not a substitute for graceful shutdown.
+
+---
+
+## Celery worker crash mid-pipeline: operational recovery
+
+### Context
+The Celery worker runs a three-stage chained pipeline:
+`Renew → Deploy → Reload+Verify`. If the worker process is killed mid-pipeline,
+the pipeline state is persisted in SQLite (`certificates.pipeline_stage`) at
+each stage transition. Recovery is automatic on the next worker startup.
+
+### What happens on crash
+1. The `@worker_ready.connect` signal fires when a new Celery worker starts.
+2. `on_worker_ready()` in `src/tasks.py` calls `resume_all_pending_pipelines()`.
+3. This queries `certops.db` for any certificate with `pipeline_stage IN
+   ('Renewed', 'Deployed pending reload')`.
+4. Each found certificate is resumed from its persisted DB stage via
+   `resume_pipeline_from_db()`.
+
+### Recovery behavior by crash point
+
+| Crash stage | DB state after crash | Recovery action |
+|---|---|---|
+| During Stage 1 (issuance) | `pipeline_stage` unchanged or `NULL` | Full pipeline re-run (idempotent) |
+| After Stage 1, before Stage 2 | `Issued pending deploy` | Re-run from Stage 1 (idempotent — skips if pending cert already staged) |
+| During Stage 2 (deploy) | `Issued pending deploy` | Stage 2 re-runs (writes are idempotent via write-then-rename) |
+| After Stage 2, before Stage 3 | `Deployed pending reload` | Skips directly to Stage 3 (cert already on disk) |
+| During Stage 3 (verify) | `Deployed pending reload` | Stage 3 re-runs (reload + verify) |
+
+### Verification
+The recovery mechanism was verified with a real OS subprocess kill test
+(Gate 1 evidence in `session_context.md §16`):
+- Worker subprocess #1 started, DB state seeded to `Deployed pending reload`.
+- Worker #1 killed with `kill()`.
+- New worker #2 started — `@worker_ready` signal automatically advanced
+  pipeline_stage to `Reload confirmed` without human intervention.
+
+### If recovery fails
+If the automatic resume doesn't complete (e.g., `step-ca` is down, or the
+host is unreachable), the pipeline will remain in its current stage. On the
+*next* worker restart, the same recovery logic runs again. There is no retry
+limit — the pipeline will keep attempting recovery on each worker restart
+until it completes or the cert is manually intervened upon.
+
+---
+
+## SQLite hygiene
+
+### WAL mode
+`db.py:get_db_connection()` enables WAL (Write-Ahead Logging) mode on every
+connection:
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+```
+
+WAL mode allows concurrent reads while a write is in progress, which is
+essential when FastAPI (HTTP requests) and the Celery worker (background
+tasks) access the same SQLite file simultaneously.
+
+### Known limitation: runtime migrations
+Schema changes (`ALTER TABLE ADD COLUMN`) run inside `get_db_connection()` on
+every call. This is functional but not clean:
+
+- It works because SQLite `ALTER TABLE ADD COLUMN` is idempotent (fails
+  silently if column already exists via the `PRAGMA table_info` check).
+- It will not scale to complex migrations (column type changes, index
+  additions, table renames).
+- **Planned fix:** move migrations to a versioned script (Alembic or manual
+  SQL files) run once at deploy time, not on every connection.
+
+### WAL file management
+SQLite WAL mode creates `-wal` and `-shm` files alongside the main `.db`
+file. These are normal and should not be deleted while the database is
+in use. If you need to compact the database:
+
+```sql
+PRAGMA wal_checkpoint(TRUNCATE);
+```
+
+This forces the WAL file to be truncated. Only run this when no concurrent
+writers are active (e.g., with the Celery worker and API server both stopped).
+
+### Backup
+To back up a running SQLite database without locking:
+
+```powershell
+python -c "import sqlite3; src=sqlite3.connect('certops.db'); dst=sqlite3.connect('certops-backup.db'); src.backup(dst); dst.close(); src.close()"
+```

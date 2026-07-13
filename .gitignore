@@ -11,6 +11,7 @@ bundle.pem
 session_context.md
 AGENTS.md
 .claude
+docs/*
 
 # Python
 venv/
