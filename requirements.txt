@@ -1,0 +1,13 @@
+azure-identity
+azure-keyvault-certificates
+bcrypt
+cryptography
+fastapi
+paramiko
+PyJWT
+python-dotenv
+pywinrm
+requests
+uvicorn[standard]
+celery
+redis

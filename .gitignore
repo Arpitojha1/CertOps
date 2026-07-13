@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+pass.txt
+local.key
+local.crt
+bundle.pem
+*.pem
+*.key
+*.tmp
+*.bak
+session_context.md
+AGENTS.md
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# step-ca local state
+.step/
+*.db
+*.log
