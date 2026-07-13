@@ -40,7 +40,9 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
 def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
     if db_path is None:
         db_path = os.getenv("CERTOPS_DB_PATH", os.getenv("DB_PATH", "./certops.db"))
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS certificates (
@@ -52,6 +54,8 @@ def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
             updated_at TEXT,
             connector_category TEXT DEFAULT 'secret_store',
             pipeline_stage TEXT,
+            pending_cert_pem TEXT,
+            pending_cert_key TEXT,
             PRIMARY KEY (vault_source, name)
         )
         """
@@ -111,6 +115,10 @@ def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE certificates ADD COLUMN next_renewal_at TEXT")
     if "next_notification_check_at" not in existing_cols:
         conn.execute("ALTER TABLE certificates ADD COLUMN next_notification_check_at TEXT")
+    if "pending_cert_pem" not in existing_cols:
+        conn.execute("ALTER TABLE certificates ADD COLUMN pending_cert_pem TEXT")
+    if "pending_cert_key" not in existing_cols:
+        conn.execute("ALTER TABLE certificates ADD COLUMN pending_cert_key TEXT")
 
     conn.execute(
         """
@@ -714,6 +722,51 @@ def get_due_certificates(
     return due_certs
 
 
+def stage_pending_cert(
+    vault_source: str,
+    name: str,
+    cert_pem: str,
+    key_pem: str,
+    pipeline_stage: str = "Issued pending deploy",
+    db_path: str | None = None,
+) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE certificates
+            SET pending_cert_pem = ?, pending_cert_key = ?, pipeline_stage = ?, updated_at = ?
+            WHERE vault_source = ? AND name = ?
+            """,
+            (cert_pem, key_pem, pipeline_stage, now_iso, vault_source, name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_pending_cert(
+    vault_source: str,
+    name: str,
+    db_path: str | None = None,
+) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            """
+            UPDATE certificates
+            SET pending_cert_pem = NULL, pending_cert_key = NULL, updated_at = ?
+            WHERE vault_source = ? AND name = ?
+            """,
+            (now_iso, vault_source, name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_certificate(
     vault_source: str, name: str, db_path: str | None = None
 ) -> dict[str, Any] | None:
@@ -723,7 +776,7 @@ def get_certificate(
             """
             SELECT vault_source, name, expiry_utc, version, common_name,
                    connector_category, pipeline_stage, renewal_threshold_days, group_id,
-                   next_renewal_at, next_notification_check_at
+                   next_renewal_at, next_notification_check_at, pending_cert_pem, pending_cert_key
             FROM certificates
             WHERE vault_source = ? AND name = ?
             """,
@@ -747,6 +800,8 @@ def get_certificate(
         "group_id": row[8],
         "next_renewal_at": _parse_utc_datetime(row[9]) if row[9] else None,
         "next_notification_check_at": _parse_utc_datetime(row[10]) if row[10] else None,
+        "pending_cert_pem": row[11] if len(row) > 11 else None,
+        "pending_cert_key": row[12] if len(row) > 12 else None,
     }
 
 
@@ -1022,8 +1077,10 @@ def insert_renewal_log(
     Append-only audit log insertion.
     Never updates or deletes records.
     Stores composite key context via (vault_source, cert_id).
-    cert_id is NULL when failure happens before a specific certificate is identified.
+    cert_id defaults to '*' when failure happens before a specific certificate is identified.
     """
+    if not cert_id:
+        cert_id = "*"
     now_iso = datetime.now(timezone.utc).isoformat()
     old_exp_str = _parse_utc_datetime(old_expiry).isoformat() if old_expiry is not None else None
     new_exp_str = _parse_utc_datetime(new_expiry).isoformat() if new_expiry is not None else None

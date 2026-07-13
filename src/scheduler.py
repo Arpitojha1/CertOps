@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Any
 
-import db
+from src import db
 
 logger = logging.getLogger("certops.scheduler")
 
@@ -75,6 +75,38 @@ class RenewalScheduler:
                 earliest_job = job
 
         return earliest_job
+
+    def get_due_jobs(self, now_utc: datetime | None = None) -> list[RenewalJob]:
+        """
+        Returns all scheduled certificates whose next_renewal_at <= now_utc and whose
+        pipeline_stage is not already in an in-flight renewal state.
+        """
+        now_utc = now_utc or datetime.now(timezone.utc)
+        certs = db.list_all_certificates(db_path=self.db_path)
+        in_flight_stages = {
+            "Renewed",
+            "Issued pending deploy",
+            "Deployed pending reload",
+            "Deployed, pending reload",
+        }
+        due_jobs: list[RenewalJob] = []
+
+        for c in certs:
+            nr = c.get("next_renewal_at")
+            if nr is None:
+                continue
+            stage = c.get("pipeline_stage")
+            if stage in in_flight_stages:
+                logger.info(
+                    "Skipping scheduled trigger for cert '%s' (in-flight stage: '%s')",
+                    c["name"],
+                    stage,
+                )
+                continue
+            if nr <= now_utc:
+                due_jobs.append(RenewalJob(c["vault_source"], c["name"], nr))
+
+        return due_jobs
 
     def _run_loop(self):
         while not self._stop_event.is_set():

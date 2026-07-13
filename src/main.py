@@ -98,11 +98,63 @@ def _deploy_and_verify_nginx(
 
 def get_active_connectors() -> list[Any]:
     """
-    Returns configured connectors from CONNECTOR_N_TYPE environment variables,
-    or falls back to auto-detecting active connectors.
+    Returns active connectors from DB 'connectors' table authoritative first
+    when any connector has explicit DB configuration.
+    Falls back to environment variables when DB connector configs are empty defaults.
     """
     connectors = []
-    # Check numbered registry first (CONNECTOR_1_TYPE, CONNECTOR_2_TYPE, ...)
+    try:
+        db_rows = db.list_connectors(active_only=True)
+        configured_rows = []
+        for row in db_rows:
+            cfg = db.decrypt_config(row.get("config", "{}"))
+            if cfg:
+                configured_rows.append((row, cfg))
+
+        if configured_rows:
+            for row, cfg in configured_rows:
+                cname = row["name"]
+                cat = (row.get("category") or "").lower()
+                thresh = row.get("renewal_threshold_days")
+                try:
+                    if cat in ("secret_store", "hashicorp", "vault") or "hashicorp" in cname.lower() or "vault" in cname.lower():
+                        vault_addr = cfg.get("url") or cfg.get("vault_addr") or cfg.get("VAULT_ADDR") or "http://localhost:8200"
+                        vault_token = cfg.get("token") or cfg.get("vault_token") or cfg.get("VAULT_TOKEN") or ""
+                        c = vault_client.HashiCorpVaultClient(vault_addr=vault_addr, vault_token=vault_token, renewal_threshold_days=thresh)
+                        c.name = cname
+                        connectors.append(c)
+                    elif cat == "azure" or "azure" in cname.lower():
+                        c = azurekeyvault.AzureKeyVaultClient.from_env(renewal_threshold_days=thresh)
+                        c.name = cname
+                        connectors.append(c)
+                    elif cat in ("host", "ssh_host", "ssh") or "ssh" in cname.lower():
+                        host = cfg.get("hostname") or cfg.get("host", "localhost")
+                        port = int(cfg.get("port", 22))
+                        username = cfg.get("username", "root")
+                        password = cfg.get("password")
+                        key_filename = cfg.get("key_filename")
+                        c = host_connector.SSHHostConnector(
+                            hostname=host,
+                            port=port,
+                            username=username,
+                            password=password,
+                            key_filename=key_filename,
+                            renewal_threshold_days=thresh,
+                        )
+                        c.name = cname
+                        connectors.append(c)
+                    elif cat in ("winrm_host", "winrm") or "winrm" in cname.lower():
+                        c = host_connector.WinRMHostConnector.from_env(renewal_threshold_days=thresh)
+                        c.name = cname
+                        connectors.append(c)
+                except Exception as exc:
+                    logger.error("Failed to instantiate DB connector '%s': %s", cname, exc)
+            if connectors:
+                return connectors
+    except Exception as exc:
+        logger.warning("Could not query DB connectors table (%s), falling back to env vars.", exc)
+
+    # Check numbered registry fallback (CONNECTOR_1_TYPE, CONNECTOR_2_TYPE, ...)
     for i in range(1, 20):
         ctype = os.getenv(f"CONNECTOR_{i}_TYPE")
         if not ctype:
@@ -355,6 +407,11 @@ def run_renewal_loop() -> RenewalSummary:
                         db.update_pipeline_stage(c_name, cid, "Hold: outside maintenance window")
                         print(f"    -> [MAINTENANCE WINDOW HOLD] Certificate '{cid}' renewed, but group ID={gid} is outside active maintenance window. Holding before deploy.")
                         summary[c_name]["succeeded"] += 1
+                        db.log_activity(
+                            event_type="certificate_renewed",
+                            target=cid,
+                            details={"connector_name": c_name, "category": "host", "old_expiry": existing_data.expiry_utc.isoformat(), "status": "held_pending_maintenance_window"},
+                        )
                         continue
 
                     # Stage 2: Deployed, pending reload
@@ -378,6 +435,11 @@ def run_renewal_loop() -> RenewalSummary:
                         renewal_threshold_days=getattr(connector, "renewal_threshold_days", None),
                     )
                     summary[c_name]["succeeded"] += 1
+                    db.log_activity(
+                        event_type="certificate_renewed",
+                        target=cid,
+                        details={"connector_name": c_name, "category": "host", "old_expiry": existing_data.expiry_utc.isoformat(), "new_expiry": new_expiry.isoformat()},
+                    )
                     print(
                         f"    -> Successfully deployed renewed cert '{cid}' to host '{c_name}'.\n"
                         f"       Pipeline status: 'Deployed, pending reload'. Requires explicit confirmation to reload."
@@ -385,6 +447,11 @@ def run_renewal_loop() -> RenewalSummary:
                 except Exception as exc:
                     logger.error("Failed renewing/deploying host cert '%s' on '%s': %s", cid, c_name, exc)
                     summary[c_name]["failed"] += 1
+                    db.log_activity(
+                        event_type="certificate_renewal_failed",
+                        target=cid,
+                        details={"connector_name": c_name, "category": "host", "error": str(exc)},
+                    )
 
         else:
             # SecretStoreConnector (HashiCorp / Azure)
@@ -463,10 +530,20 @@ def run_renewal_loop() -> RenewalSummary:
                         )
 
                     summary[c_name]["succeeded"] += 1
+                    db.log_activity(
+                        event_type="certificate_renewed",
+                        target=cname,
+                        details={"connector_name": c_name, "category": "secret_store", "old_expiry": dt.isoformat(), "new_expiry": write_res["expiry_utc"].isoformat()},
+                    )
                     print(f"    -> Successfully renewed '{cname}' in vault '{c_name}'.")
                 except Exception as exc:
                     logger.error("Certificate processing failed for name='%s' in '%s': %s", cname, c_name, exc)
                     summary[c_name]["failed"] += 1
+                    db.log_activity(
+                        event_type="certificate_renewal_failed",
+                        target=cname,
+                        details={"connector_name": c_name, "category": "secret_store", "error": str(exc)},
+                    )
 
     print("\n" + "=" * 70)
     print("RENEWAL LOOP SUMMARY")

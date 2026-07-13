@@ -347,5 +347,112 @@ class TestGate4ActivityLog(unittest.TestCase):
         print("[RESULT] PASSED: RBAC filter excludes admin-only events for viewer at query layer")
 
 
+    def test_08_renewal_loop_writes_activity_log_with_iso_timestamps(self):
+        """Run the real run_renewal_loop() with a stubbed connector so that the
+        .isoformat() calls in main.py are the code under test — not a hand-copy
+        of them in this file.  Proves: (a) no TypeError from json.dumps on the
+        datetime objects that flow through the renewal path, (b) entries land in
+        the activity_log table, (c) a viewer can see them."""
+        print("\n=== TEST 8: run_renewal_loop() Writes certificate_renewed to Activity Log ===")
+        from datetime import datetime, timedelta, timezone
+        from contextlib import nullcontext
+        from unittest.mock import patch, MagicMock
+
+        class _StubConnector:
+            """Bare-minimum SecretStoreConnector stand-in for run_renewal_loop()."""
+            name = "stub_vault"
+            renewal_threshold_days = 99999.0
+
+            def list_certificates(self):
+                return [{"name": "stub-cert", "expiry_utc": "2020-01-01T00:00:00+00:00", "version": "1"}]
+
+            def get_certificate(self, name):
+                return {"common_name": name}
+
+            def write_certificate(self, name, cert_pem, key_pem):
+                return {"expiry_utc": datetime(2027, 1, 1, tzinfo=timezone.utc), "version": "2"}
+
+        stub = _StubConnector()
+        fake_cert_pem = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALHM2VOBmOyyMA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBnRl\n-----END CERTIFICATE-----\n"
+        fake_key_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGcY5unA67hqlYMd4Prn7dOt\n-----END RSA PRIVATE KEY-----\n"
+
+        os.environ["RENEWAL_THRESHOLD_DAYS"] = "99999"
+        os.environ["STEP_CA_PASSWORD_FILE"] = "./pass.txt"
+        os.environ["STEP_CA_URL"] = "https://localhost:8443"
+        os.environ["STEP_CA_FINGERPRINT"] = "abc123"
+        os.environ["VERIFY_HOST"] = "localhost"
+        os.environ["VERIFY_PORT"] = "443"
+        os.environ["NGINX_CONTAINER_NAME"] = "certops-nginx-1"
+        os.environ["VAULT_CERT_PATH"] = "secret/local-certs"
+
+        from src.main import run_renewal_loop
+
+        with patch("src.main.get_active_connectors", return_value=[stub]), \
+             patch("src.main.load_dotenv"), \
+             patch("src.main.ca_client.issue_certificate", return_value=(fake_cert_pem, fake_key_pem)), \
+             patch("src.main.db") as mock_db:
+            mock_db.renewal_context = lambda *a, **kw: nullcontext()
+            mock_db.log_activity = db.log_activity
+            mock_db.upsert_certificate = db.upsert_certificate
+            mock_db.get_due_certificates = db.get_due_certificates
+            mock_db._parse_utc_datetime = db._parse_utc_datetime
+            mock_db.get_certificate = db.get_certificate
+            mock_db.get_db_connection = db.get_db_connection
+
+            summary = run_renewal_loop()
+
+        # Verify the renewal succeeded at the loop level
+        self.assertTrue(summary["stub_vault"]["succeeded"] >= 1, "Loop must report at least one success")
+        print(f"[LOOP SUMMARY] {dict(summary['stub_vault'])}")
+
+        # Verify activity_log has a certificate_renewed entry
+        resp = self.client.get(
+            "/api/activity-log?event_type=certificate_renewed&limit=200",
+            cookies=self.admin_cookie,
+        )
+        self.assertEqual(resp.status_code, 200)
+        items = resp.json()["items"]
+        matching = [e for e in items if e["target"] == "stub-cert"]
+        self.assertGreaterEqual(len(matching), 1, "At least one certificate_renewed entry for stub-cert")
+        entry = matching[0]
+        print(f"[ACTIVITY LOG] id={entry['id']} event_type={entry['event_type']} target={entry['target']}")
+
+        # Verify details contain ISO-formatted timestamps (not raw datetime objects)
+        details = json.loads(entry["details"])
+        print(f"[DETAILS] {json.dumps(details, indent=2)}")
+        self.assertEqual(details["connector_name"], "stub_vault")
+        self.assertEqual(details["category"], "secret_store")
+        # These assertions fail if main.py passes raw datetime objects —
+        # json.dumps() would have raised TypeError before the row was written.
+        datetime.fromisoformat(details["old_expiry"])
+        datetime.fromisoformat(details["new_expiry"])
+        self.assertGreater(
+            datetime.fromisoformat(details["new_expiry"]),
+            datetime.fromisoformat(details["old_expiry"]),
+            "new_expiry must be after old_expiry",
+        )
+        print("[ISO CHECK] old_expiry and new_expiry are valid ISO strings, new > old")
+
+        # Verify viewer-visible (certificate_renewed is NOT in _ADMIN_ONLY_EVENTS)
+        resp_v = self.client.get(
+            "/api/activity-log?event_type=certificate_renewed&limit=200",
+            cookies=self.viewer_cookie,
+        )
+        self.assertEqual(resp_v.status_code, 200)
+        viewer_matching = [e for e in resp_v.json()["items"] if e["target"] == "stub-cert"]
+        self.assertGreaterEqual(len(viewer_matching), 1, "Viewer MUST see certificate_renewed events")
+        print("[VIEWER CHECK] certificate_renewed visible to viewer role")
+
+        # Verify no certificate_renewal_failed appeared (renewal succeeded)
+        resp_fail = self.client.get(
+            "/api/activity-log?event_type=certificate_renewal_failed&limit=200",
+            cookies=self.admin_cookie,
+        )
+        fail_targets = [e["target"] for e in resp_fail.json()["items"] if e["target"] == "stub-cert"]
+        self.assertEqual(fail_targets, [], "No certificate_renewal_failed should exist for stub-cert")
+        print("[NO FAILURE] No certificate_renewal_failed entry — renewal succeeded cleanly")
+        print("[RESULT] PASSED: run_renewal_loop() logs certificate_renewed with ISO timestamps via real code path")
+
+
 if __name__ == "__main__":
     unittest.main()

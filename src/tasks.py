@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 from celery import Celery, chain
 from celery.signals import worker_ready
-from src import db, main
+from src import ca_client, db, host_connector, main, scheduler, verify
 
 logger = logging.getLogger("certops.tasks")
 
@@ -17,35 +17,80 @@ app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    beat_schedule={
+        "check-and-trigger-renewals-every-5-minutes": {
+            "task": "tasks.check_and_trigger_renewals",
+            "schedule": 300.0,
+        },
+    },
 )
+
+
+def _resolve_connector(vault_source: str):
+    connectors = main.get_active_connectors()
+    for c in connectors:
+        if getattr(c, "name", "") == vault_source:
+            return c
+    return None
 
 
 @app.task(name="tasks.renew_certificate")
 def task_renew_certificate(vault_source: str, cert_id: str, db_path: str | None = None) -> dict:
     """
-    Stage 1: Renew certificate and persist 'Renewed' state to DB.
+    Stage 1: Renew certificate using step-ca and stage pending_cert_pem / pending_cert_key in DB.
+    Idempotent: skips issuance if certificate is already staged with an in-flight pipeline stage.
     """
     logger.info("Running Stage 1 (Renew): cert='%s' source='%s'", cert_id, vault_source)
     now_dt = datetime.now(timezone.utc)
 
-    # Ensure certificate record exists or update its stage to Renewed
     rec = db.get_certificate(vault_source, cert_id, db_path=db_path)
+    current_stage = rec.get("pipeline_stage") if rec else None
+    existing_pem = rec.get("pending_cert_pem") if rec else None
+
+    if existing_pem and current_stage in ("Issued pending deploy", "Renewed"):
+        logger.info("Cert '%s' already staged with pending cert in stage '%s'. Skipping re-issuance.", cert_id, current_stage)
+        return {
+            "vault_source": vault_source,
+            "cert_id": cert_id,
+            "stage": current_stage,
+            "db_path": db_path,
+        }
+
+    subject = rec.get("common_name") if rec and rec.get("common_name") else cert_id.split("/")[-1]
+    password_file = os.getenv("STEP_CA_PASSWORD_FILE", "./pass.txt")
+    ca_url = os.getenv("STEP_CA_URL", "https://localhost:8443")
+    fingerprint = os.getenv("STEP_CA_FINGERPRINT")
+
+    new_cert_pem, new_key_pem = ca_client.issue_certificate(
+        subject=subject,
+        password_file=password_file,
+        ca_url=ca_url,
+        fingerprint=fingerprint,
+    )
+
+    new_expiry, _ = verify.get_pem_cert_info(new_cert_pem)
     if rec is None:
         db.upsert_certificate(
             vault_source=vault_source,
             name=cert_id,
-            expiry_utc=now_dt,
+            expiry_utc=new_expiry,
             connector_category="host",
-            pipeline_stage="Renewed",
+            pipeline_stage="Issued pending deploy",
             db_path=db_path,
         )
-    else:
-        db.update_pipeline_stage(vault_source, cert_id, "Renewed", db_path=db_path)
+    db.stage_pending_cert(
+        vault_source=vault_source,
+        name=cert_id,
+        cert_pem=new_cert_pem,
+        key_pem=new_key_pem,
+        pipeline_stage="Issued pending deploy",
+        db_path=db_path,
+    )
 
     return {
         "vault_source": vault_source,
         "cert_id": cert_id,
-        "stage": "Renewed",
+        "stage": "Issued pending deploy",
         "db_path": db_path,
     }
 
@@ -53,8 +98,8 @@ def task_renew_certificate(vault_source: str, cert_id: str, db_path: str | None 
 @app.task(name="tasks.deploy_certificate")
 def task_deploy_certificate(payload: dict) -> dict:
     """
-    Stage 2: Deploy certificate to host target and persist 'Deployed pending reload' state to DB.
-    If DB state is already 'Deployed pending reload' or later, deployment is skipped idempotenly.
+    Stage 2: Deploy staged certificate to host target or vault and persist 'Deployed pending reload'.
+    If DB state is already 'Deployed pending reload' or later, deployment is skipped idempotently.
     """
     vault_source = payload["vault_source"]
     cert_id = payload["cert_id"]
@@ -77,7 +122,43 @@ def task_deploy_certificate(payload: dict) -> dict:
             "db_path": db_path,
         }
 
-    # Perform deployment and persist state
+    pending_pem = rec.get("pending_cert_pem") if rec else None
+    pending_key = rec.get("pending_cert_key") if rec else None
+    if not pending_pem:
+        raise RuntimeError(f"Cannot deploy cert '{cert_id}': no pending_cert_pem staged in DB.")
+
+    connector = _resolve_connector(vault_source)
+    new_expiry, _ = verify.get_pem_cert_info(pending_pem)
+    subject = rec.get("common_name") if rec and rec.get("common_name") else cert_id.split("/")[-1]
+
+    if connector and isinstance(connector, host_connector.HostConnector):
+        deploy_data = host_connector.CertData(
+            cert_id=cert_id,
+            cert_pem=pending_pem,
+            expiry_utc=new_expiry,
+            common_name=subject,
+            private_key_pem=pending_key,
+        )
+        connector.deploy_certificate(cert_id, deploy_data)
+    elif connector and hasattr(connector, "write_certificate"):
+        connector.write_certificate(cert_id, pending_pem, pending_key or "")
+        nginx_cert_name = os.getenv("VAULT_CERT_PATH", "secret/local-certs").split("/")[-1]
+        if cert_id == nginx_cert_name and vault_source == "hashicorp":
+            deploy_cert_path = os.getenv("DEPLOY_CERT_PATH", "./local.crt")
+            deploy_key_path = os.getenv("DEPLOY_KEY_PATH", "./local.key")
+            main.atomic_deploy_file(deploy_cert_path, pending_pem, make_backup=True)
+            if pending_key:
+                main.atomic_deploy_file(deploy_key_path, pending_key, make_backup=True)
+    else:
+        # Fallback for local testing when connector is not registered
+        nginx_cert_name = os.getenv("VAULT_CERT_PATH", "secret/local-certs").split("/")[-1]
+        if cert_id == nginx_cert_name:
+            deploy_cert_path = os.getenv("DEPLOY_CERT_PATH", "./local.crt")
+            deploy_key_path = os.getenv("DEPLOY_KEY_PATH", "./local.key")
+            main.atomic_deploy_file(deploy_cert_path, pending_pem, make_backup=True)
+            if pending_key:
+                main.atomic_deploy_file(deploy_key_path, pending_key, make_backup=True)
+
     db.update_pipeline_stage(vault_source, cert_id, "Deployed pending reload", db_path=db_path)
     return {
         "vault_source": vault_source,
@@ -90,7 +171,8 @@ def task_deploy_certificate(payload: dict) -> dict:
 @app.task(name="tasks.verify_reload")
 def task_verify_reload(payload: dict) -> dict:
     """
-    Stage 3: Confirm reload and verify service certificate, persisting 'Reload confirmed' state to DB.
+    Stage 3: Confirm reload and verify service certificate against live TLS, persisting 'Reload confirmed' state to DB
+    and clearing staged pending certs.
     """
     vault_source = payload["vault_source"]
     cert_id = payload["cert_id"]
@@ -109,14 +191,56 @@ def task_verify_reload(payload: dict) -> dict:
             "db_path": db_path,
         }
 
-    # Execute reload confirmation and update DB state
+    connector = _resolve_connector(vault_source)
+    pending_pem = rec.get("pending_cert_pem") if rec else None
+    if not pending_pem:
+        # If no pending pem staged, read cert from disk or connector to determine expected fingerprint
+        if os.path.exists(os.getenv("DEPLOY_CERT_PATH", "./local.crt")):
+            with open(os.getenv("DEPLOY_CERT_PATH", "./local.crt"), "r", encoding="utf-8") as f:
+                pending_pem = f.read()
+
+    expected_expiry, expected_fp = verify.get_pem_cert_info(pending_pem) if pending_pem else (None, None)
+
+    if connector and isinstance(connector, host_connector.HostConnector):
+        reload_res = connector.trigger_reload(cert_id)
+        if not reload_res.success:
+            raise RuntimeError(f"Service reload FAILED for '{cert_id}':\n{reload_res.output}")
+    else:
+        nginx_cert_name = os.getenv("VAULT_CERT_PATH", "secret/local-certs").split("/")[-1]
+        if cert_id == nginx_cert_name:
+            verify_host = os.getenv("VERIFY_HOST", "localhost")
+            verify_port = int(os.getenv("VERIFY_PORT", "443"))
+            nginx_container = os.getenv("NGINX_CONTAINER_NAME", "certops-nginx-1")
+            pending_key = rec.get("pending_cert_key") if rec else ""
+            if pending_pem and pending_key:
+                main._deploy_and_verify_nginx(
+                    pending_pem, pending_key, verify_host, verify_port, nginx_container
+                )
+
     db.update_pipeline_stage(vault_source, cert_id, "Reload confirmed", db_path=db_path)
+    db.clear_pending_cert(vault_source, cert_id, db_path=db_path)
     return {
         "vault_source": vault_source,
         "cert_id": cert_id,
         "stage": "Reload confirmed",
         "db_path": db_path,
     }
+
+
+@app.task(name="tasks.check_and_trigger_renewals")
+def check_and_trigger_renewals(db_path: str | None = None) -> list[dict[str, str]]:
+    """
+    Celery Beat periodic task: scans DB for certificates reaching next_renewal_at
+    and triggers start_pipeline if not already in-flight.
+    """
+    sched = scheduler.RenewalScheduler(db_path=db_path)
+    due_jobs = sched.get_due_jobs()
+    triggered = []
+    for job in due_jobs:
+        logger.info("Triggering renewal pipeline for due certificate '%s' (%s)", job.cert_name, job.vault_source)
+        start_pipeline(job.vault_source, job.cert_name, db_path=db_path)
+        triggered.append({"vault_source": job.vault_source, "cert_id": job.cert_name})
+    return triggered
 
 
 def start_pipeline(vault_source: str, cert_id: str, db_path: str | None = None):

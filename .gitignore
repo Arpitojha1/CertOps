@@ -10,6 +10,7 @@ bundle.pem
 *.bak
 session_context.md
 AGENTS.md
+.claude
 
 # Python
 venv/
