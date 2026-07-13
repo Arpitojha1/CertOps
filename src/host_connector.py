@@ -133,11 +133,13 @@ class SSHHostConnector(HostConnector):
             password=self.password,
             key_filename=self.key_filename,
             timeout=10,
+            banner_timeout=10,
+            auth_timeout=10,
         )
         return client
 
     def _exec_command(self, client: paramiko.SSHClient, cmd: str) -> tuple[int, str, str]:
-        stdin, stdout, stderr = client.exec_command(cmd)
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=10)
         exit_status = stdout.channel.recv_exit_status()
         out_str = stdout.read().decode("utf-8", errors="replace")
         err_str = stderr.read().decode("utf-8", errors="replace")
