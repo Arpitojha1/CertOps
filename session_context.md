@@ -1209,3 +1209,70 @@ All one-off verification scripts (`verify_*.py`), task runner diffs/reports (`.s
 **Design Decision:** Option A (Dashboard-Only).
 - **Architectural Rationale:** The agent execution module (`certops-agent/`) acts purely as an HTTP client when pushing telemetry. It reads its scoped token (`AGENT_TOKEN_SIGNING_KEY` / bearer token) and transmits it via `AgentTelemetryClient` in `agent_telemetry.py`. Only the central server (`certops-dashboard/`) requires token verification, signing, revocation checking (`agent_tokens` SQLite table), and FastAPI dependency injection (`require_agent_token_or_db`).
 - **Repo State Verification:** `certops-agent/src/agent_auth.py` has been completely removed (`git rm`). The sole authoritative implementation resides in `certops-dashboard/src/agent_auth.py` (`6449 bytes`). Zero duplicate or drift-prone auth logic exists across the package boundaries.
+
+### Step 3: Finding 4 — Real Boot Checks (`uvicorn` + `Celery worker`)
+**Real `uvicorn` Boot Output (`certops-dashboard/src/api:app`):**
+Verified live uvicorn server boot on `http://127.0.0.1:8099`, confirmed public endpoint `GET /api/health` returns `200 OK`, confirmed protected endpoint `GET /api/certificates` enforces RBAC with `401 Unauthorized` when requested without cookie/JWT, and verified clean lifecycle startup (`sched.start()`) and shutdown (`sched.stop()`):
+```text
+INFO:     Started server process [33868]
+INFO:     Waiting for application startup.
+2026-07-15 08:37:11,495 [INFO] RenewalScheduler started (event-driven mode, DB-backed recovery).
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8099 (Press CTRL+C to quit)
+================================================================================
+CERTOPS-DASHBOARD REAL UVICORN BOOT & HTTP ENDPOINT VERIFICATION
+================================================================================
+
+[STEP 1] uvicorn server starting on http://127.0.0.1:8099...
+[SCHEDULER SLEEP] Next job 'live-vault-cert-01' scheduled at 2026-10-10T00:00:00+00:00 (in 7505568.50s). Zero-polling sleep activated (capped at 3600s).
+[STEP 2] uvicorn server booted successfully! Testing real HTTP request...
+INFO:     127.0.0.1:63094 - "GET /api/health HTTP/1.1" 200 OK
+[STEP 3a] HTTP GET /api/health -> Status: 200
+          Response body: {"status":"ok"}
+INFO:     127.0.0.1:63095 - "GET /api/certificates HTTP/1.1" 401 Unauthorized
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-07-15 08:37:11,716 [INFO] RenewalScheduler stopped.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [33868]
+[STEP 3b] HTTP GET /api/certificates without cookie -> Status: 401 (Expected RBAC enforcement)
+
+SUCCESS: Real uvicorn boot, public endpoint serving (200), and RBAC enforcement (401) PASSED.
+[STEP 4] Shutting down uvicorn server cleanly...
+uvicorn server shut down.
+```
+
+**Real Celery Worker Subprocess Boot Output (`certops-agent/src/tasks.py`):**
+Verified live `celery worker` startup (`--pool=solo`) inside `certops-agent/`, confirming clean connection to Redis broker (`redis://localhost:6379/0`), registration of all four core pipeline tasks, and successful triggering of the `@worker_ready` auto-resume handler:
+```text
+ -------------- celery@Arpits-Lappy v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Windows-11-10.0.26200-SP0 2026-07-15 08:42:02
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         certops:0x1f570528590
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 12 (solo)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . tasks.check_and_trigger_renewals
+  . tasks.deploy_certificate
+  . tasks.renew_certificate
+  . tasks.verify_reload
+
+[2026-07-15 08:42:02,373: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2026-07-15 08:42:02,398: INFO/MainProcess] mingle: searching for neighbors
+[2026-07-15 08:42:03,497: INFO/MainProcess] mingle: all alone
+[2026-07-15 08:42:03,554: INFO/MainProcess] Celery worker ready signal triggered. Scanning DB for interrupted pipelines...
+[2026-07-15 08:42:03,560: WARNING/MainProcess] [DB MIGRATION] Running DB schema migrations (version 0 -> 2)
+[2026-07-15 08:42:03,560: INFO/MainProcess] Running DB schema migrations (version 0 -> 2)
+[2026-07-15 08:42:03,573: INFO/MainProcess] Worker startup auto-resume complete. Resumed 0 pipeline(s).
+[2026-07-15 08:42:03,573: INFO/MainProcess] celery@Arpits-Lappy ready.
+```
+

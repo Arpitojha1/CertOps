@@ -5,13 +5,17 @@ import sys
 import time
 from pathlib import Path
 
-# Add project root to path
+# Add package root and src to path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "src"))
+_sibling = project_root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db
 
-DB_PATH = "real_crash_demo.db"
+DB_PATH = str((project_root / "real_crash_demo.db").resolve())
 
 
 def main():
@@ -23,6 +27,7 @@ def main():
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
 
+    db.run_migrations(DB_PATH)
     conn = db.get_db_connection(DB_PATH)
     cert_id = "cert-real-crash-01"
     vault_source = "ssh_host"
@@ -122,27 +127,32 @@ def main():
 
     # Wait for Worker #2 ready signal to fire and auto-resume pending pipelines
     print(
-        "         Waiting 4 seconds for @worker_ready signal to trigger auto-resume on startup..."
+        "         Waiting up to 8 seconds for @worker_ready signal to trigger auto-resume on startup..."
     )
-    time.sleep(4.0)
+    start_wait = time.time()
+    final_stage = stage_post_kill
+    while time.time() - start_wait < 8.0:
+        time.sleep(0.5)
+        conn = db.get_db_connection(DB_PATH)
+        final_stage = conn.execute(
+            "SELECT pipeline_stage FROM certificates WHERE name=?", (cert_id,)
+        ).fetchone()[0]
+        conn.close()
+        if final_stage == "Reload confirmed":
+            break
 
-    # Forcibly terminate Worker #2 cleanly after test window
+    # Forcibly terminate Worker #2 cleanly after test window and capture logs
     worker2.kill()
-    worker2.wait()
-
-    # Verify final DB state
-    conn = db.get_db_connection(DB_PATH)
-    final_stage = conn.execute(
-        "SELECT pipeline_stage FROM certificates WHERE name=?", (cert_id,)
-    ).fetchone()[0]
-    conn.close()
+    out2, _ = worker2.communicate()
+    print("\n[WORKER #2 LOGS PREVIEW]:")
+    print("\n".join(out2.strip().split("\n")[:25]))
 
     print(f"\n[STEP 5] RAW DB QUERY AFTER WORKER #2 STARTUP:")
     print(f"         cert='{cert_id}' -> pipeline_stage='{final_stage}'")
 
     assert (
         final_stage == "Reload confirmed"
-    ), f"Expected 'Reload confirmed', got '{final_stage}'"
+    ), f"Expected 'Reload confirmed', got '{final_stage}'. Worker logs:\n{out2}"
 
     print("\n" + "=" * 80)
     print("REAL SUBPROCESS KILL & AUTOMATIC STARTUP RECOVERY PROOF PASSED!")
