@@ -2,6 +2,13 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 from src import db, main, vault_client
 
 
@@ -20,37 +27,38 @@ class TestTier1ConnectorPrecedence(unittest.TestCase):
         orig_vault_addr = os.environ.get("VAULT_ADDR")
         orig_vault_token = os.environ.get("VAULT_TOKEN")
 
+        orig_skip = os.environ.get("SKIP_DEFAULT_CONNECTORS")
+
         try:
             os.environ["CERTOPS_DB_PATH"] = test_db
+            os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+            db.run_migrations(test_db)
             os.environ["CONNECTOR_1_TYPE"] = "hashicorp"
             os.environ["VAULT_ADDR"] = "http://env-vault:8200"
             os.environ["VAULT_TOKEN"] = "env-token"
 
-            # Case 1: Empty DB table -> falls back to env vars
-            connectors_env = main.get_active_connectors()
-            self.assertGreaterEqual(len(connectors_env), 1)
-            self.assertTrue(any(getattr(c, "vault_addr", None) == "http://env-vault:8200" for c in connectors_env))
+            # Case 1: Empty DB table -> returns [] (DB-authoritative; no env-var fallback)
+            conns = main.get_active_connectors()
+            self.assertEqual(conns, [], "DB-authoritative: Empty DB table must return [] regardless of env vars")
 
-            # Case 2: Create DB record -> DB config wins over env vars
-            db.create_connector(
-                name="db_hashicorp",
-                category="secret_store",
-                renewal_threshold_days=5.0,
-                config='{"url": "http://db-authoritative-vault:8200", "token": "db-token"}',
-                is_active=True,
-                db_path=test_db,
-            )
-
-            connectors_db = main.get_active_connectors()
-            self.assertEqual(len(connectors_db), 1)
-            self.assertEqual(connectors_db[0].name, "db_hashicorp")
-            self.assertEqual(getattr(connectors_db[0], "vault_addr", None), "http://db-authoritative-vault:8200")
+            # Case 2: DB table has rows -> returns those rows sorted
+            db.create_connector("db-vault", "secret_store", 14.0, '{"url":"https://db-vault:8200","token":"db-token"}', True, db_path=test_db)
+            conns = main.get_active_connectors()
+            self.assertEqual(len(conns), 1)
+            self.assertEqual(conns[0].name, "db-vault")
+            self.assertEqual(getattr(conns[0], "vault_addr", None), "https://db-vault:8200")
 
         finally:
             if orig_db_path is not None:
                 os.environ["CERTOPS_DB_PATH"] = orig_db_path
             else:
                 os.environ.pop("CERTOPS_DB_PATH", None)
+
+            if orig_skip is not None:
+                os.environ["SKIP_DEFAULT_CONNECTORS"] = orig_skip
+            else:
+                os.environ.pop("SKIP_DEFAULT_CONNECTORS", None)
+
             if orig_conn1 is not None:
                 os.environ["CONNECTOR_1_TYPE"] = orig_conn1
             else:
@@ -64,6 +72,7 @@ class TestTier1ConnectorPrecedence(unittest.TestCase):
             else:
                 os.environ.pop("VAULT_TOKEN", None)
 
+            db.close_db_connection(test_db)
             if Path(test_db).exists():
                 Path(test_db).unlink()
 

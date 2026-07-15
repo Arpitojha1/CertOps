@@ -94,6 +94,12 @@ class HashiCorpVaultClient:
                 raise RuntimeError("VAULT_TOKEN not set for HashiCorpVaultClient")
 
         self.vault_addr = vault_addr.rstrip("/")
+        if "vault:" in self.vault_addr:
+            import socket
+            try:
+                socket.gethostbyname("vault")
+            except socket.gaierror:
+                self.vault_addr = self.vault_addr.replace("://vault:", "://127.0.0.1:")
         self.vault_token = vault_token
         self.mount = mount.strip("/")
         self.prefix = prefix.lstrip("/")

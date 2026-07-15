@@ -9,6 +9,13 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db, tasks, verify
 
@@ -21,6 +28,7 @@ class TestTier1TasksIntegration(unittest.TestCase):
     def test_full_tasks_pipeline_closed_loop(self):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             test_db = f.name
+        db.run_migrations(test_db)
 
         try:
             cert_id = "local-certs"
@@ -63,6 +71,7 @@ class TestTier1TasksIntegration(unittest.TestCase):
             self.assertEqual(live_fp, expected_fp, "Live Nginx served certificate fingerprint does not match issued cert")
 
         finally:
+            db.close_db_connection(test_db)
             if Path(test_db).exists():
                 Path(test_db).unlink()
 

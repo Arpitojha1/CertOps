@@ -13,6 +13,21 @@ from typing import Optional
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
+import sys
+from pathlib import Path
+_agent_root = Path(__file__).resolve().parent.parent.parent / "certops-agent"
+if _agent_root.exists() and str(_agent_root) not in sys.path:
+    sys.path.append(str(_agent_root))
+_agent_src = _agent_root / "src"
+if _agent_src.exists() and str(_agent_src) not in sys.path:
+    sys.path.append(str(_agent_src))
+_dashboard_root = Path(__file__).resolve().parent.parent.parent / "certops-dashboard"
+if _dashboard_root.exists() and str(_dashboard_root) not in sys.path:
+    sys.path.append(str(_dashboard_root))
+_dashboard_src = _dashboard_root / "src"
+if _dashboard_src.exists() and str(_dashboard_src) not in sys.path:
+    sys.path.append(str(_dashboard_src))
+
 if __package__ is None or __package__ == "":
     import db
 else:
@@ -177,19 +192,3 @@ def validate_agent_token(
 
 def require_agent_token(token_data: dict = Depends(validate_agent_token)) -> dict:
     return token_data
-
-
-@router.post("/api/telemetry/push", dependencies=[Depends(require_agent_token)])
-def push_telemetry(payload: dict):
-    try:
-        if __package__ is None or __package__ == "" or not __package__.startswith("src"):
-            from routes import telemetry_ingest
-        else:
-            from .routes import telemetry_ingest
-        telemetry_ingest._RECEIVED_PAYLOADS.append({
-            "payload": payload,
-            "server_received_at": datetime.now(timezone.utc).isoformat()
-        })
-    except Exception:
-        pass
-    return {"status": "received", "timestamp": datetime.now(timezone.utc).isoformat()}

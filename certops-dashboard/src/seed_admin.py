@@ -19,7 +19,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Locate db and auth relative to this file's directory
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
+_agent_src = Path(__file__).resolve().parent.parent.parent / "certops-agent" / "src"
+if _agent_src.exists() and str(_agent_src) not in sys.path:
+    sys.path.insert(0, str(_agent_src))
 import auth
 import db
 

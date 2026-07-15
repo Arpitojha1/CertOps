@@ -4,7 +4,7 @@ Implements strict allow-list filtering and error sanitization according to TELEM
 """
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 import requests
 
 
@@ -62,7 +62,7 @@ class AgentTelemetryClient:
         try:
             data = resp.json()
         except Exception:
-            data = {"detail": resp.text}
+            data = {"detail": (resp.text[:200] if resp.text else "Non-JSON response")}
         return resp.status_code, data
 
 
@@ -72,24 +72,49 @@ def sanitize_connector_error(
     raw_error_message: str,
     cert_cn: str,
     expiry_utc: str,
-    renewal_stage: str
+    renewal_stage: str,
+    error_code: Optional[str] = None
 ) -> dict[str, Any]:
     """
     Sanitize raw error strings (which might contain stack traces, passwords, IPs, or hostnames)
-    into clean, contract-compliant items.
+    into clean, contract-compliant items matching TELEMETRY_CONTRACT.md enum.
     """
     raw_lower = raw_error_message.lower() if raw_error_message else ""
-    if "timeout" in raw_lower:
-        error_code = "ERR_CONNECTION_TIMEOUT"
+    if error_code:
+        chosen_code = error_code
+        status_msg = f"Error state: {chosen_code}"
+    elif "timeout" in raw_lower:
+        chosen_code = "ERR_CONNECTION_TIMEOUT"
         status_msg = "Connection timed out during host check"
     elif any(k in raw_lower for k in ["refused", "unreachable", "10061", "10060", "connect error"]):
-        error_code = "ERR_CONNECTOR_UNREACHABLE"
+        chosen_code = "ERR_CONNECTOR_UNREACHABLE"
         status_msg = "Connection error on connector"
     elif any(k in raw_lower for k in ["auth", "password", "permission", "unauthorized", "401", "403", "forbidden"]):
-        error_code = "ERR_AUTH_FAILED"
+        chosen_code = "ERR_AUTH_FAILED"
         status_msg = "Authentication failed on connector"
+    elif "not found" in raw_lower or "404" in raw_lower:
+        chosen_code = "ERR_CERT_NOT_FOUND"
+        status_msg = "Certificate not found on connector"
+    elif "reject" in raw_lower or "renewal" in raw_lower:
+        chosen_code = "ERR_RENEWAL_REJECTED"
+        status_msg = "Certificate renewal rejected"
+    elif "deploy" in raw_lower:
+        chosen_code = "ERR_DEPLOY_FAILED"
+        status_msg = "Deployment failed on connector"
+    elif "reload" in raw_lower:
+        chosen_code = "ERR_RELOAD_FAILED"
+        status_msg = "Service reload failed after deployment"
+    elif "verify" in raw_lower:
+        chosen_code = "ERR_VERIFY_FAILED"
+        status_msg = "Post-deployment verification check failed"
+    elif "maintenance" in raw_lower:
+        chosen_code = "ERR_MAINTENANCE_WINDOW_ACTIVE"
+        status_msg = "Action deferred due to active maintenance window"
+    elif "internal" in raw_lower:
+        chosen_code = "ERR_INTERNAL_AGENT_ERROR"
+        status_msg = "Internal agent operation failure"
     else:
-        error_code = "ERR_CONNECTOR_OPERATION_FAILED"
+        chosen_code = "ERR_CONNECTOR_OPERATION_FAILED"
         status_msg = "Operation failed on connector"
 
     return {
@@ -97,7 +122,7 @@ def sanitize_connector_error(
         "connector_opaque_id": connector_opaque_id,
         "connector_health": "error",
         "connector_status": status_msg,
-        "error_code": error_code,
+        "error_code": chosen_code,
         "cert_cn": cert_cn,
         "cert_san": [],
         "expiry_utc": expiry_utc,

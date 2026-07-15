@@ -4,6 +4,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-agent"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import api, db
 from src.api import app
@@ -50,11 +58,13 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
         os.environ["DB_PATH"] = cls.db_path
         os.environ["ENV"] = "development"
         os.environ["COOKIE_SECURE"] = "false"
+        db.run_migrations(cls.db_path)
 
         cls.client = TestClient(app)
 
     @classmethod
     def tearDownClass(cls):
+        db.close_db_connection(cls.db_path)
         if os.path.exists(cls.db_path):
             os.remove(cls.db_path)
         for k, val in cls.orig_env.items():
@@ -65,10 +75,10 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
 
     def setUp(self):
         # Reset DB before each test
+        db.close_db_connection(self.db_path)
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
-        conn = db.get_db_connection(self.db_path)
-        conn.close()
+        db.run_migrations(self.db_path)
 
         from src import auth
         admin_pass_hash = auth.hash_password("admin_secret_123")
@@ -278,6 +288,7 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
         fresh_db_path = "test_fresh_init_gate3.db"
         if os.path.exists(fresh_db_path):
             os.remove(fresh_db_path)
+        db.run_migrations(fresh_db_path)
         try:
             conn_fresh = db.get_db_connection(fresh_db_path)
             rows = conn_fresh.execute("SELECT name, renewal_threshold_days FROM connectors").fetchall()
@@ -287,6 +298,7 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
             for row in rows:
                 self.assertIsNone(row[1], f"Default connector {row[0]} threshold should be None on fresh init")
         finally:
+            db.close_db_connection(fresh_db_path)
             if os.path.exists(fresh_db_path):
                 os.remove(fresh_db_path)
 

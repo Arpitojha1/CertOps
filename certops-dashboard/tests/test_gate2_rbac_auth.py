@@ -3,6 +3,15 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-agent"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
+
 from src import api, auth, db
 
 
@@ -20,6 +29,7 @@ class TestGate2RBACAuth(unittest.TestCase):
             os.remove(cls.db_path)
         os.environ["CERTOPS_DB_PATH"] = cls.db_path
         os.environ["DB_PATH"] = cls.db_path
+        db.run_migrations(cls.db_path)
 
         # Seed admin and viewer users
         admin_pass_hash = auth.hash_password("admin_secret_123")
@@ -31,6 +41,7 @@ class TestGate2RBACAuth(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        db.close_db_connection(cls.db_path)
         if os.path.exists(cls.db_path):
             os.remove(cls.db_path)
         for k, val in cls.orig_env.items():

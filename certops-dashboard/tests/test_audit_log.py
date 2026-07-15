@@ -10,8 +10,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Ensure src/ is on sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Ensure package root, src, and agent sibling are on sys.path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-agent"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 import ca_client
 import db
@@ -36,6 +41,7 @@ def test_audit_log_smoke():
         test_db_path.unlink()
 
     os.environ["DB_PATH"] = str(test_db_path)
+    db.run_migrations(str(test_db_path))
     os.environ["RENEWAL_THRESHOLD_DAYS"] = "3650"  # Ensure certs are due for test
     try:
         print("=== Step 1: Secret Store Connector (HashiCorp Vault) Renewal & Audit Logging ===")
@@ -147,6 +153,7 @@ def test_audit_log_smoke():
         else:
             os.environ.pop("DB_PATH", None)
         if test_db_path.exists():
+            db.close_db_connection(str(test_db_path))
             test_db_path.unlink()
 
 

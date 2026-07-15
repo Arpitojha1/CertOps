@@ -5,7 +5,12 @@ import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 import db
 import scheduler
@@ -18,14 +23,20 @@ class TestPhase34Scheduler(unittest.TestCase):
             self.test_db.unlink()
         self._orig_db = os.environ.get("DB_PATH")
         os.environ["DB_PATH"] = str(self.test_db)
+        db.run_migrations(str(self.test_db))
 
     def tearDown(self):
         if self._orig_db is not None:
             os.environ["DB_PATH"] = self._orig_db
         else:
             os.environ.pop("DB_PATH", None)
-        if self.test_db.exists():
-            self.test_db.unlink()
+        db.close_db_connection(str(self.test_db))
+        for p in (self.test_db, Path(f"{self.test_db}-wal"), Path(f"{self.test_db}-shm")):
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
 
     def test_scheduler_recovery_and_zero_polling_smoke(self):
         print("\n=== Phase 3.4 Smoke Test: Scheduler Recovery & Zero-Polling Sleep ===")

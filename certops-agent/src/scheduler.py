@@ -30,7 +30,7 @@ class RenewalScheduler:
     Produces zero polling API/CPU activity while waiting for future renewal times.
     """
     def __init__(self, db_path: str | None = None, job_callback: Callable[[], Any] | None = None):
-        self.db_path = db_path or os.getenv("DB_PATH", "./certops.db")
+        self.db_path = db_path or os.getenv("CERTOPS_DB_PATH", os.getenv("DB_PATH", "./certops.db"))
         self.job_callback = job_callback
         self._stop_event = threading.Event()
         self._wakeup_event = threading.Event()
@@ -134,8 +134,10 @@ class RenewalScheduler:
                 # Brief yield to avoid busy looping if callback did not advance next_renewal_at
                 time.sleep(0.5)
             else:
-                print(f"[SCHEDULER SLEEP] Next job '{job.cert_name}' scheduled at {job.next_renewal_at.isoformat()} (in {seconds_until_due:.2f}s). Zero-polling sleep activated.")
-                woke_early = self._wakeup_event.wait(timeout=seconds_until_due)
+                _MAX_SLEEP = 3600.0
+                sleep_time = min(seconds_until_due, _MAX_SLEEP)
+                print(f"[SCHEDULER SLEEP] Next job '{job.cert_name}' scheduled at {job.next_renewal_at.isoformat()} (in {seconds_until_due:.2f}s). Zero-polling sleep activated (capped at {sleep_time:.0f}s).")
+                woke_early = self._wakeup_event.wait(timeout=sleep_time)
                 self._wakeup_event.clear()
                 if woke_early and not self._stop_event.is_set():
                     logger.debug("Scheduler interrupted by notify_schedule_change(). Recalculating next_renewal_at...")

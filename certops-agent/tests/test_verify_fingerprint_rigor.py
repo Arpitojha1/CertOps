@@ -12,6 +12,14 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db
 from src.deployer import run_verify_pipeline

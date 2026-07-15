@@ -1,8 +1,11 @@
 import logging
 import os
 from datetime import datetime, timezone
+from dotenv import load_dotenv
 from celery import Celery, chain
 from celery.signals import worker_ready
+
+load_dotenv()
 from src import ca_client, db, host_connector, main, scheduler, verify
 
 logger = logging.getLogger("certops.tasks")

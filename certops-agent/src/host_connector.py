@@ -260,13 +260,14 @@ class SSHHostConnector(HostConnector):
                 if exit_code != 0:
                     raise RuntimeError(f"Failed to atomically deploy cert to '{cert_id}': {err or out}")
 
-                if cert_data.private_key_pem and cert_data.key_path:
-                    tmp_key = f"{cert_data.key_path}.tmp"
+                if cert_data.private_key_pem:
+                    target_key_path = cert_data.key_path or (os.path.splitext(cert_id)[0] + ".key")
+                    tmp_key = f"{target_key_path}.tmp"
                     with sftp.open(tmp_key, "w") as f:
                         f.write(cert_data.private_key_pem)
-                    exit_code, out, err = self._exec_command(client, f"mv -f {tmp_key} {cert_data.key_path}")
+                    exit_code, out, err = self._exec_command(client, f"mv -f {tmp_key} {target_key_path}")
                     if exit_code != 0:
-                        raise RuntimeError(f"Failed to atomically deploy private key to '{cert_data.key_path}': {err or out}")
+                        raise RuntimeError(f"Failed to atomically deploy private key to '{target_key_path}': {err or out}")
             finally:
                 sftp.close()
         finally:

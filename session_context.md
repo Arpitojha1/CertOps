@@ -1349,20 +1349,33 @@ SUCCESS: 0 violations. Real payload matches TELEMETRY_CONTRACT exactly.
 All fields present are strictly allow-listed (`agent_id`, `agent_version`, `timestamp`, `items`, `connector_type`, `connector_opaque_id`, `connector_health`, `connector_status`, `error_code`, `cert_cn`, `cert_san`, `expiry_utc`, `renewal_stage`). Zero deny-listed patterns (`PRIVATE KEY`, `secret/data/`, passwords, IP addresses, raw hostnames, stack traces) cross the wire.
 
 ### Step 5: Finding 5 — Baseline Parity & Test Suite Audit Table
-**Pre-Split Baseline vs. Post-Split Partitioned Test Counts:**
-- **Pre-Split Baseline (from Track D initial Stage E review):** `57 passed, 9 skipped` (`66 collected`).
-- **Post-Split `certops-agent/tests/` (`PYTHONPATH="c:\Users\Arpit\certOps\certops-agent"`):** `27 passed, 8 skipped` (`35 collected`).
-- **Post-Split `certops-dashboard/tests/` (`PYTHONPATH="c:\Users\Arpit\certOps\certops-dashboard"`):** `30 passed, 1 skipped` (`31 collected`).
-- **Total Combined Post-Split:** `57 passed, 9 skipped` (`66 collected`). Exact 1:1 parity with zero regressions, zero test loss, and exact package boundary isolation.
+**Historical Pre-Split Baseline Reconciliation vs. Post-Split Partitioned Test Counts:**
+To avoid circular reasoning (where sum of post-split halves `27+30=57` is self-referenced as pre-split parity), the exact test collection history across commits was independently reconciled from `git` artifact history (`4095697` to `HEAD`) and task execution logs:
+1. **Pre-Split Commit Baseline (`4095697`, right before Track D started):** Exactly **47 tests collected** across 23 test files in `tests/` (`pytest --co` across monolithic repo).
+2. **Tracks B, C, and D Additions Across Split (`+19 collected tests`):**
+   - Track B (`test_agent_auth.py`): `+5 tests` (Dashboard).
+   - Track C (`test_telemetry_push.py`): `+5 tests` (Agent).
+   - Track D (`test_deployer_real_connector.py`): `+4 tests` (Agent).
+   - Track D (`test_verify_fingerprint_rigor.py`): `+3 tests` (Agent).
+   - Track D (`test_tier2_sqlite_concurrency.py` additions): `+2 tests` (Agent).
+3. **Reconciled True Baseline Total:** `47 pre-split` + `19 newly added across tracks` = **66 tests collected** (`57 passed, 9 skipped`).
+4. **Why `task-329` (Prior Session Summary) Reported `65 passed, 10 skipped (75 collected)`:**
+   Inspection of `task-329.log` (`C:/Users/Arpit/.gemini/antigravity/brain/546b0d3f-1629-4a33-8657-b82e9dbbecb9/.system_generated/tasks/task-329.log`, lines 16 & 88) confirmed that `task-329` actually collected `35 items` in `certops-agent/tests/` (`27 passed, 8 skipped`) and `31 items` in `certops-dashboard/tests/` (`30 passed, 1 skipped`), exactly `66 collected`. However, when authoring the markdown summary block in Step 332 (`task-329` report), the author mis-transcribed `collected 35 items` (`27 passed, 8 skipped` + `1 skipped` in dashboard = `9 skipped total`) as `35 passed, 9 skipped` in the `certops-agent` section. That manual transcription error (`35 passed` instead of `27 passed`) created the phantom `75 collected` / `65 passed` figure.
+
+| Metric | Historical Pre-Split (`4095697`) | Plus Tracks B/C/D Additions | Reconciled True Baseline (`66 collected`) | Current Post-Split (`certops-agent`) | Current Post-Split (`certops-dashboard`) | Total Post-Split Combined (`HEAD`) | Parity Verdict |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Passed Tests** | 38 | +19 | **57** | 27 | 30 | **57** | **Exact Match (0 lost)** |
+| **Skipped Tests** | 9 | +0 | **9** | 8 | 1 | **9** | **Exact Match (0 lost)** |
+| **Total Collected** | 47 | +19 | **66** | 35 | 31 | **66** | **Exact Match (0 lost)** |
 
 **Partitioned Test Execution Logs:**
 `certops-agent/tests/` Run Summary:
 ```text
-================= 27 passed, 8 skipped, 5 warnings in 17.90s ==================
+================= 27 passed, 8 skipped, 5 warnings in 15.55s ==================
 ```
 `certops-dashboard/tests/` Run Summary:
 ```text
-================ 30 passed, 1 skipped, 113 warnings in 21.25s =================
+================ 30 passed, 1 skipped, 113 warnings in 18.78s =================
 ```
 
 **Skipped Tests Audit Table (`pytest -rs` Summary Across Both Suites):**

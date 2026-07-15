@@ -22,8 +22,13 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from dotenv import load_dotenv
 
-# Ensure src/ is in sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Ensure package root and src are in sys.path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 import azurekeyvault
 import main

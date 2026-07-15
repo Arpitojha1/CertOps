@@ -16,6 +16,15 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+import sys
+from pathlib import Path
+_agent_root = Path(__file__).resolve().parent.parent.parent / "certops-agent"
+if _agent_root.exists() and str(_agent_root) not in sys.path:
+    sys.path.append(str(_agent_root))
+_agent_src = _agent_root / "src"
+if _agent_src.exists() and str(_agent_src) not in sys.path:
+    sys.path.append(str(_agent_src))
+
 if __package__ is None or __package__ == "":
     import db
 else:

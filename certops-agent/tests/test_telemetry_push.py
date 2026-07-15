@@ -15,9 +15,16 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-# Add repo root and src/ to sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Add package roots and src to sys.path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
+_sibling_src = _sibling / "src"
+if _sibling_src.exists() and str(_sibling_src) not in sys.path:
+    sys.path.insert(0, str(_sibling_src))
 
 from src.api import app
 from src import agent_telemetry
@@ -100,6 +107,7 @@ def check_payload_deny_list(data: Any) -> list[str]:
 
 class TestTelemetryPush(unittest.TestCase):
     def setUp(self):
+        os.environ.setdefault("AGENT_TOKEN_SIGNING_KEY", "test-signing-key-for-push-tests")
         self.client = TestClient(app)
         # Clear in-memory sink before each test
         telemetry_ingest.clear_received_payloads()

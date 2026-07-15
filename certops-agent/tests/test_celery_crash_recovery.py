@@ -5,8 +5,13 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Ensure src is on path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Ensure package root and src are on path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db, tasks
 
@@ -20,13 +25,13 @@ class TestCeleryCrashRecovery(unittest.TestCase):
         self.test_db = "test_crash_recovery.db"
         if os.path.exists(self.test_db):
             os.remove(self.test_db)
-        conn = db.get_db_connection(self.test_db)
-        conn.close()
+        db.run_migrations(self.test_db)
         # Enable eager mode for deterministic step-by-step crash & recovery simulation
         tasks.app.conf.update(task_always_eager=True)
 
     def tearDown(self):
         tasks.app.conf.update(task_always_eager=False)
+        db.close_db_connection(self.test_db)
         if os.path.exists(self.test_db):
             try:
                 os.remove(self.test_db)

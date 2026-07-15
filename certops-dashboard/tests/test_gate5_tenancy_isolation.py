@@ -11,6 +11,14 @@ import unittest
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-agent"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db
 from src.api import app
@@ -23,6 +31,7 @@ class TestGate5TenancyIsolation(unittest.TestCase):
         self.db_path = self.temp_db.name
         self.temp_db.close()
         os.environ["DB_PATH"] = self.db_path
+        db.run_migrations(self.db_path)
 
         # Create Admin, Viewer A (tenant_A), and Viewer B (tenant_B)
         db.create_user("admin@certops.internal", "$2b$12$fakehash", role="admin", tenant_id="default")
@@ -50,6 +59,7 @@ class TestGate5TenancyIsolation(unittest.TestCase):
         self.client = TestClient(app)
 
     def tearDown(self):
+        db.close_db_connection(self.db_path)
         try:
             os.unlink(self.db_path)
         except Exception:

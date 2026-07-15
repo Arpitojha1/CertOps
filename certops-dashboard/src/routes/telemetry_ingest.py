@@ -60,6 +60,15 @@ def require_agent_token_or_db(
 
     # Fallback to DB-backed check via agent_auth if not in memory registry
     try:
+        import sys
+        from pathlib import Path
+        _agent_root = Path(__file__).resolve().parent.parent.parent.parent / "certops-agent"
+        if _agent_root.exists() and str(_agent_root) not in sys.path:
+            sys.path.append(str(_agent_root))
+        _agent_src = _agent_root / "src"
+        if _agent_src.exists() and str(_agent_src) not in sys.path:
+            sys.path.append(str(_agent_src))
+
         if __package__ is None or __package__ == "" or not __package__.startswith("src"):
             import agent_auth
         else:
@@ -67,7 +76,7 @@ def require_agent_token_or_db(
         token_data = agent_auth.validate_agent_token(authorization=authorization, x_agent_token=x_agent_token)
         return raw_token
     except Exception as exc:
-        if isinstance(exc, HTTPException):
+        if isinstance(exc, (HTTPException, RuntimeError)):
             raise exc
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid agent token") from exc
 

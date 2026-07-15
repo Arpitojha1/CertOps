@@ -4,6 +4,15 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-agent"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
+
 from src import api, auth, db
 
 
@@ -51,26 +60,28 @@ class TestAgentAuth(unittest.TestCase):
         from src import agent_auth
 
         raw_token, token_rec = agent_auth.create_agent_token(scope="telemetry_push", db_path=self.db_path)
+        valid_payload = {"agent_id": "test-agent", "agent_version": "1.0", "timestamp": "2026-07-15T00:00:00Z", "items": []}
         
         response = self.client.post(
             "/api/telemetry/push",
             headers={"Authorization": f"Bearer {raw_token}"},
-            json={"hostname": "host1", "metrics": {"status": "ok"}}
+            json=valid_payload
         )
-        self.assertEqual(response.status_code, 200, f"Expected 200, got {response.status_code}: {response.text}")
+        self.assertEqual(response.status_code, 202, f"Expected 202, got {response.status_code}: {response.text}")
         data = response.json()
-        self.assertEqual(data.get("status"), "received")
+        self.assertEqual(data.get("status"), "accepted")
 
     def test_02_valid_dashboard_session_cookie_or_jwt_rejected_on_telemetry_push(self):
         """Test 2: Valid dashboard session cookie/JWT with NO agent token is rejected on telemetry-push dependency/route."""
         # Create a valid dashboard session token (for an admin user)
         dashboard_token = auth._make_token(user_id=1, email="admin@example.com", role="admin")
+        valid_payload = {"agent_id": "test-agent", "agent_version": "1.0", "timestamp": "2026-07-15T00:00:00Z", "items": []}
         
         # 1. Try sending as cookie with no Authorization header
         resp_cookie = self.client.post(
             "/api/telemetry/push",
             cookies={auth.COOKIE_NAME: dashboard_token},
-            json={"metrics": "test"}
+            json=valid_payload
         )
         self.assertEqual(resp_cookie.status_code, 401, f"Expected 401 when sending dashboard cookie, got {resp_cookie.status_code}")
 
@@ -78,7 +89,7 @@ class TestAgentAuth(unittest.TestCase):
         resp_bearer = self.client.post(
             "/api/telemetry/push",
             headers={"Authorization": f"Bearer {dashboard_token}"},
-            json={"metrics": "test"}
+            json=valid_payload
         )
         self.assertIn(resp_bearer.status_code, (401, 403), f"Expected 401/403 when sending dashboard JWT as bearer, got {resp_bearer.status_code}")
 
@@ -107,14 +118,15 @@ class TestAgentAuth(unittest.TestCase):
         from src import agent_auth
 
         raw_token, _ = agent_auth.create_agent_token(scope="telemetry_push", db_path=self.db_path)
+        valid_payload = {"agent_id": "test-agent", "agent_version": "1.0", "timestamp": "2026-07-15T00:00:00Z", "items": []}
 
         # Verify works initially
         resp1 = self.client.post(
             "/api/telemetry/push",
             headers={"Authorization": f"Bearer {raw_token}"},
-            json={"test": "initial"}
+            json=valid_payload
         )
-        self.assertEqual(resp1.status_code, 200)
+        self.assertEqual(resp1.status_code, 202)
 
         # Revoke the token
         revoked = agent_auth.revoke_agent_token(raw_token=raw_token, db_path=self.db_path)
@@ -124,7 +136,7 @@ class TestAgentAuth(unittest.TestCase):
         resp2 = self.client.post(
             "/api/telemetry/push",
             headers={"Authorization": f"Bearer {raw_token}"},
-            json={"test": "after_revoke"}
+            json=valid_payload
         )
         self.assertEqual(resp2.status_code, 401, f"Expected 401 after revocation, got {resp2.status_code}: {resp2.text}")
 
@@ -132,6 +144,7 @@ class TestAgentAuth(unittest.TestCase):
         """Test 5: Token secret read from AGENT_TOKEN_SIGNING_KEY specifically — test asserts app fails loudly
         if AGENT_TOKEN_SIGNING_KEY is unset. Also assert changing JWT_SECRET alone does not invalidate an agent token and vice versa."""
         from src import agent_auth
+        valid_payload = {"agent_id": "test-agent", "agent_version": "1.0", "timestamp": "2026-07-15T00:00:00Z", "items": []}
 
         # 1. Unset AGENT_TOKEN_SIGNING_KEY -> verify loud failure (RuntimeError when creating or validating)
         os.environ.pop("AGENT_TOKEN_SIGNING_KEY", None)
@@ -145,7 +158,7 @@ class TestAgentAuth(unittest.TestCase):
         resp_unset = self.client.post(
             "/api/telemetry/push",
             headers={"Authorization": "Bearer dummy_token"},
-            json={}
+            json=valid_payload
         )
         self.assertEqual(resp_unset.status_code, 500, f"Expected 500 loud failure when AGENT_TOKEN_SIGNING_KEY unset, got {resp_unset.status_code}")
 
@@ -157,18 +170,18 @@ class TestAgentAuth(unittest.TestCase):
         resp_alpha = self.client.post(
             "/api/telemetry/push",
             headers={"Authorization": f"Bearer {raw_token}"},
-            json={}
+            json=valid_payload
         )
-        self.assertEqual(resp_alpha.status_code, 200)
+        self.assertEqual(resp_alpha.status_code, 202)
 
         # 3. Change JWT_SECRET alone -> agent token MUST NOT be invalidated
         os.environ["JWT_SECRET"] = "completely-changed-jwt-secret-888"
         resp_after_jwt_change = self.client.post(
             "/api/telemetry/push",
             headers={"Authorization": f"Bearer {raw_token}"},
-            json={}
+            json=valid_payload
         )
-        self.assertEqual(resp_after_jwt_change.status_code, 200, "Changing JWT_SECRET invalidated agent token!")
+        self.assertEqual(resp_after_jwt_change.status_code, 202, "Changing JWT_SECRET invalidated agent token!")
 
         # 4. Change AGENT_TOKEN_SIGNING_KEY alone -> agent token MUST now be rejected (while JWT_SECRET unchanged)
         os.environ["AGENT_TOKEN_SIGNING_KEY"] = "agent-key-beta-777"

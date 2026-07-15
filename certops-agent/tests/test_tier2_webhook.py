@@ -11,6 +11,14 @@ import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db, main, notifier
 
@@ -39,8 +47,7 @@ class TestTier2WebhookNotification(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "test_tier2_webhook.db")
-        with db.get_db_connection(self.db_path):
-            pass
+        db.run_migrations(self.db_path)
 
         _WebhookHandler.received_requests = []
         self.server = http.server.HTTPServer(("127.0.0.1", 0), _WebhookHandler)
@@ -53,6 +60,7 @@ class TestTier2WebhookNotification(unittest.TestCase):
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
+        db.close_db_connection(self.db_path)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
         os.environ.pop("WEBHOOK_URL", None)
 

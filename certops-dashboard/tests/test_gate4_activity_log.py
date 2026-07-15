@@ -3,6 +3,15 @@ import os
 import unittest
 
 from fastapi.testclient import TestClient
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-agent"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
+
 from src import api, db
 from src.api import app
 
@@ -28,6 +37,7 @@ class TestGate4ActivityLog(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        db.close_db_connection(cls.db_path)
         if os.path.exists(cls.db_path):
             os.remove(cls.db_path)
         for k, val in cls.orig_env.items():
@@ -37,10 +47,10 @@ class TestGate4ActivityLog(unittest.TestCase):
                 os.environ[k] = val
 
     def setUp(self):
+        db.close_db_connection(self.db_path)
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
-        conn = db.get_db_connection(self.db_path)
-        conn.close()
+        db.run_migrations(self.db_path)
 
         from src import auth
         admin_hash = auth.hash_password("admin_secret_123")

@@ -20,16 +20,28 @@ from pydantic import BaseModel
 
 import logging
 
+import sys
+from pathlib import Path
+_agent_root = Path(__file__).resolve().parent.parent.parent / "certops-agent"
+if _agent_root.exists() and str(_agent_root) not in sys.path:
+    sys.path.append(str(_agent_root))
+_agent_src = _agent_root / "src"
+if _agent_src.exists() and str(_agent_src) not in sys.path:
+    sys.path.append(str(_agent_src))
+
 if __package__ is None or __package__ == "":
+    import agent_auth
     import auth
     import db
     import main as main_module
     from auth import get_current_user, require_admin
     from scheduler import RenewalScheduler
+    from routes import telemetry_ingest
 else:
-    from . import auth, db, main as main_module
+    from . import agent_auth, auth, db, main as main_module
     from .auth import get_current_user, require_admin
     from .scheduler import RenewalScheduler
+    from .routes import telemetry_ingest
 
 load_dotenv()
 
@@ -72,6 +84,8 @@ def shutdown_cleanup() -> None:
 
 # Auth routes (login/me/logout/signup) — mounted at root level so /auth/* works
 app.include_router(auth.router)
+app.include_router(agent_auth.router)
+app.include_router(telemetry_ingest.router)
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -180,9 +194,10 @@ def get_renewal_log(
     cert_id: str | None = Query(default=None),
     event_type: str | None = Query(default=None),
     success: bool | None = Query(default=None),
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    logs = db.get_renewal_logs(cert_id=cert_id)
+    scope = _get_tenant_scope(current_user)
+    logs = db.get_renewal_logs(cert_id=cert_id, tenant_id=scope)
     if event_type is not None:
         logs = [l for l in logs if l.get("event_type") == event_type]
     if success is not None:
@@ -201,17 +216,19 @@ def get_activity_log(
     current_user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     is_admin = current_user.get("role") == "admin"
+    scope = _get_tenant_scope(current_user)
     res = db.get_activity_logs(
         limit=max(limit + offset, 500) if include_renewal_log else limit,
         offset=0 if include_renewal_log else offset,
         event_type=event_type,
         admin_only=is_admin,
+        tenant_id=scope,
     )
     items = list(res["items"])
     total = res["total"]
 
     if include_renewal_log:
-        ren_logs = db.get_renewal_logs()
+        ren_logs = db.get_renewal_logs(tenant_id=scope)
         for row in ren_logs:
             et = row.get("event_type") or "certificate_renewed"
             if event_type is not None and et != event_type:
@@ -288,7 +305,8 @@ def list_connectors(
 
 @app.post("/api/connectors")
 def create_connector(body: CreateConnectorRequest, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
-    existing = db.get_connector_by_name(body.name)
+    caller_tenant = current_user.get("tenant_id", "default")
+    existing = db.get_connector_by_name(body.name, tenant_id=caller_tenant)
     if existing:
         raise HTTPException(status_code=409, detail=f"Connector '{body.name}' already exists")
     config_str = json.dumps(body.config)
@@ -298,6 +316,7 @@ def create_connector(body: CreateConnectorRequest, current_user: dict = Depends(
         renewal_threshold_days=body.renewal_threshold_days,
         config=config_str,
         is_active=body.is_active,
+        tenant_id=caller_tenant,
     )
     connector = db.get_connector(cid)
     actor_id, actor_email = _actor_from_user(current_user)
@@ -307,6 +326,7 @@ def create_connector(body: CreateConnectorRequest, current_user: dict = Depends(
         actor_email=actor_email,
         target=body.name,
         details={"name": body.name, "category": body.category, "config": db.redact_config(body.config)},
+        tenant_id=caller_tenant,
     )
     return _serialize_connector(connector)
 
@@ -318,9 +338,12 @@ def update_connector(
     body: UpdateConnectorRequest,
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
-    existing = db.get_connector(connector_id)
+    caller_tenant = current_user.get("tenant_id", "default")
+    existing = db.get_connector(connector_id, tenant_id=caller_tenant)
     if not existing:
         raise HTTPException(status_code=404, detail="Connector not found")
+    if existing.get("tenant_id", "default") != caller_tenant:
+        raise HTTPException(status_code=403, detail="Access denied: connector belongs to a different tenant")
 
     config_str = json.dumps(body.config) if body.config is not None else None
     db.update_connector(
@@ -346,15 +369,19 @@ def update_connector(
         actor_email=actor_email,
         target=existing["name"],
         details=details,
+        tenant_id=caller_tenant,
     )
     return _serialize_connector(updated)
 
 
 @app.delete("/api/connectors/{connector_id}")
 def delete_connector(connector_id: int, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
-    existing = db.get_connector(connector_id)
+    caller_tenant = current_user.get("tenant_id", "default")
+    existing = db.get_connector(connector_id, tenant_id=caller_tenant)
     if not existing:
         raise HTTPException(status_code=404, detail="Connector not found")
+    if existing.get("tenant_id", "default") != caller_tenant:
+        raise HTTPException(status_code=403, detail="Access denied: connector belongs to a different tenant")
     try:
         db.delete_connector(connector_id)
     except ValueError as exc:
@@ -366,15 +393,19 @@ def delete_connector(connector_id: int, current_user: dict = Depends(require_adm
         actor_email=actor_email,
         target=existing["name"],
         details={"connector_id": connector_id, "name": existing["name"], "category": existing["category"]},
+        tenant_id=caller_tenant,
     )
     return {"status": "ok", "deleted": connector_id}
 
 
 @app.post("/api/connectors/{connector_id}/test")
 def test_connector(connector_id: int, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
-    existing = db.get_connector(connector_id)
+    caller_tenant = current_user.get("tenant_id", "default")
+    existing = db.get_connector(connector_id, tenant_id=caller_tenant)
     if not existing:
         raise HTTPException(status_code=404, detail="Connector not found")
+    if existing.get("tenant_id", "default") != caller_tenant:
+        raise HTTPException(status_code=403, detail="Access denied: connector belongs to a different tenant")
     actor_id, actor_email = _actor_from_user(current_user)
     db.log_activity(
         event_type="connector_tested",
@@ -382,6 +413,7 @@ def test_connector(connector_id: int, current_user: dict = Depends(require_admin
         actor_email=actor_email,
         target=existing["name"],
         details={"connector_id": connector_id, "name": existing["name"]},
+        tenant_id=caller_tenant,
     )
     return {
         "success": True,
@@ -393,8 +425,9 @@ def test_connector(connector_id: int, current_user: dict = Depends(require_admin
 # ─── groups ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/groups")
-def list_groups(_: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
-    return db.list_groups()
+def list_groups(current_user: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
+    scope = _get_tenant_scope(current_user)
+    return db.list_groups(tenant_id=scope)
 
 
 class CreateGroupRequest(BaseModel):
@@ -404,7 +437,8 @@ class CreateGroupRequest(BaseModel):
 
 @app.post("/api/groups")
 def create_group(body: CreateGroupRequest, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
-    group_id = db.create_group(body.name, body.description)
+    caller_tenant = current_user.get("tenant_id", "default")
+    group_id = db.create_group(body.name, body.description, tenant_id=caller_tenant)
     actor_id, actor_email = _actor_from_user(current_user)
     db.log_activity(
         event_type="group_created",
@@ -412,6 +446,7 @@ def create_group(body: CreateGroupRequest, current_user: dict = Depends(require_
         actor_email=actor_email,
         target=body.name,
         details={"group_id": group_id, "name": body.name, "description": body.description},
+        tenant_id=caller_tenant,
     )
     return db.get_group(group_id)
 
@@ -441,9 +476,10 @@ def assign_certificate_group(body: AssignGroupRequest, current_user: dict = Depe
 @app.get("/api/maintenance-windows")
 def list_maintenance_windows(
     group_id: int | None = Query(default=None),
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    windows = db.list_maintenance_windows(group_id=group_id)
+    scope = _get_tenant_scope(current_user)
+    windows = db.list_maintenance_windows(group_id=group_id, tenant_id=scope)
     return [
         {**w, "start_time": w["start_time"].isoformat(), "end_time": w["end_time"].isoformat()}
         for w in windows
@@ -462,7 +498,11 @@ def create_maintenance_window(
     body: CreateMaintenanceWindowRequest,
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
-    window_id = db.create_maintenance_window(body.group_id, body.start_time, body.end_time, body.recurrence)
+    caller_tenant = current_user.get("tenant_id", "default")
+    window_id = db.create_maintenance_window(
+        body.group_id, body.start_time, body.end_time, body.recurrence,
+        tenant_id=caller_tenant,
+    )
     windows = db.list_maintenance_windows(group_id=body.group_id)
     match = next(w for w in windows if w["id"] == window_id)
     actor_id, actor_email = _actor_from_user(current_user)
@@ -472,6 +512,7 @@ def create_maintenance_window(
         actor_email=actor_email,
         target=f"group:{body.group_id}",
         details={"window_id": window_id, "group_id": body.group_id, "start_time": body.start_time, "end_time": body.end_time, "recurrence": body.recurrence},
+        tenant_id=caller_tenant,
     )
     return {**match, "start_time": match["start_time"].isoformat(), "end_time": match["end_time"].isoformat()}
 
@@ -481,9 +522,10 @@ def create_maintenance_window(
 @app.get("/api/notification-policies")
 def list_notification_policies(
     group_id: int | None = Query(default=None),
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    return db.list_notification_policies(group_id=group_id)
+    scope = _get_tenant_scope(current_user)
+    return db.list_notification_policies(group_id=group_id, tenant_id=scope)
 
 
 class CreateNotificationPolicyRequest(BaseModel):
@@ -496,7 +538,8 @@ def create_notification_policy(
     body: CreateNotificationPolicyRequest,
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
-    policy_id = db.create_notification_policy(body.group_id, body.threshold_days)
+    caller_tenant = current_user.get("tenant_id", "default")
+    policy_id = db.create_notification_policy(body.group_id, body.threshold_days, tenant_id=caller_tenant)
     policies = db.list_notification_policies(group_id=body.group_id)
     actor_id, actor_email = _actor_from_user(current_user)
     db.log_activity(
@@ -505,14 +548,23 @@ def create_notification_policy(
         actor_email=actor_email,
         target=f"group:{body.group_id}",
         details={"policy_id": policy_id, "group_id": body.group_id, "threshold_days": body.threshold_days},
+        tenant_id=caller_tenant,
     )
     return next(p for p in policies if p["id"] == policy_id)
 
 
 @app.delete("/api/notification-policies/{policy_id}")
 def delete_notification_policy(policy_id: int, current_user: dict = Depends(require_admin)) -> dict[str, str]:
+    caller_tenant = current_user.get("tenant_id", "default")
     conn = db.get_db_connection()
     try:
+        row = conn.execute(
+            "SELECT tenant_id FROM notification_policies WHERE id = ?", (policy_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Notification policy not found")
+        if (row[0] or "default") != caller_tenant:
+            raise HTTPException(status_code=403, detail="Access denied: policy belongs to a different tenant")
         conn.execute("DELETE FROM notification_policies WHERE id = ?", (policy_id,))
         conn.commit()
     finally:
@@ -524,6 +576,7 @@ def delete_notification_policy(policy_id: int, current_user: dict = Depends(requ
         actor_email=actor_email,
         target=f"policy:{policy_id}",
         details={"policy_id": policy_id},
+        tenant_id=caller_tenant,
     )
     return {"status": "deleted"}
 
@@ -533,27 +586,29 @@ def delete_notification_policy(policy_id: int, current_user: dict = Depends(requ
 @app.get("/api/notification-log")
 def get_notification_log(
     cert_id: str | None = Query(default=None),
-    _: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
-    return db.get_notification_logs(cert_id=cert_id)
+    scope = _get_tenant_scope(current_user)
+    return db.get_notification_logs(cert_id=cert_id, tenant_id=scope)
 
 
 # ─── scheduler status ─────────────────────────────────────────────────────────
 
 @app.get("/api/scheduler/status")
-def scheduler_status(_: dict = Depends(get_current_user)) -> dict[str, Any]:
+def scheduler_status(current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """
     Derives scheduler state from certificates.next_renewal_at and recent renewal_log rows.
     Also exposes whether the in-process event-driven RenewalScheduler thread is running.
     """
     now_utc = datetime.now(timezone.utc)
-    certs = db.list_all_certificates()
+    scope = _get_tenant_scope(current_user)
+    certs = db.list_all_certificates(tenant_id=scope)
     upcoming = sorted(
         (c for c in certs if c.get("next_renewal_at") is not None),
         key=lambda c: c["next_renewal_at"],
     )
     next_job = upcoming[0] if upcoming else None
-    recent_events = db.get_renewal_logs()[-20:]
+    recent_events = db.get_renewal_logs(tenant_id=scope)[-20:]
     sched = getattr(app.state, "scheduler", None)
     is_running = bool(
         sched is not None

@@ -12,6 +12,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,9 @@ from typing import Any
 from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
+
+_db_lock = threading.RLock()
+_db_connections: dict[str, sqlite3.Connection] = {}
 
 if __package__ is None or __package__ == "":
     import verify
@@ -38,24 +42,22 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
-def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> None:
+def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None) -> None:
     """
     Runs SQLite schema creation and migrations once per database.
     # ponytail: manual PRAGMA user_version check is sufficient for additive schema changes; deferred Alembic until complex migrations needed.
     """
     close_conn = False
-    if isinstance(db_path_or_conn, sqlite3.Connection):
+    if isinstance(db_path_or_conn, sqlite3.Connection) or hasattr(db_path_or_conn, "execute"):
         conn = db_path_or_conn
     else:
         db_path = db_path_or_conn
         if db_path is None:
             db_path = os.getenv("CERTOPS_DB_PATH", os.getenv("DB_PATH", "./certops.db"))
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn = get_db_connection(db_path)
         close_conn = True
 
     try:
@@ -90,7 +92,8 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> N
             CREATE TABLE IF NOT EXISTS groups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
-                description TEXT
+                description TEXT,
+                tenant_id TEXT DEFAULT 'default'
             )
             """
         )
@@ -101,7 +104,8 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> N
                 group_id INTEGER REFERENCES groups(id),
                 start_time TEXT NOT NULL,
                 end_time TEXT NOT NULL,
-                recurrence TEXT DEFAULT 'once'
+                recurrence TEXT DEFAULT 'once',
+                tenant_id TEXT DEFAULT 'default'
             )
             """
         )
@@ -110,7 +114,8 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> N
             CREATE TABLE IF NOT EXISTS notification_policies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id INTEGER REFERENCES groups(id),
-                threshold_days REAL NOT NULL
+                threshold_days REAL NOT NULL,
+                tenant_id TEXT DEFAULT 'default'
             )
             """
         )
@@ -121,7 +126,8 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> N
                 vault_source TEXT,
                 cert_id TEXT NOT NULL,
                 policy_id INTEGER REFERENCES notification_policies(id),
-                sent_at TEXT NOT NULL
+                sent_at TEXT NOT NULL,
+                tenant_id TEXT DEFAULT 'default'
             )
             """
         )
@@ -229,10 +235,29 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> N
                 actor_email TEXT,
                 target TEXT,
                 details TEXT,
-                timestamp TEXT NOT NULL
+                timestamp TEXT NOT NULL,
+                tenant_id TEXT DEFAULT 'default'
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT UNIQUE NOT NULL,
+                scope TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                revoked_at TEXT,
+                connector_context TEXT
+            )
+            """
+        )
+
+        # Idempotent tenant_id migrations for tables added without it
+        for _tbl in ("groups", "maintenance_windows", "notification_policies", "notification_log", "activity_log", "renewal_log"):
+            _cur = conn.execute(f"PRAGMA table_info({_tbl})")
+            if "tenant_id" not in {r[1] for r in _cur.fetchall()}:
+                conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN tenant_id TEXT DEFAULT 'default'")
 
         cur = conn.execute("SELECT COUNT(*) FROM connectors")
         if cur.fetchone()[0] == 0 and os.getenv("SKIP_DEFAULT_CONNECTORS") != "1":
@@ -254,14 +279,131 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | None = None) -> N
             conn.close()
 
 
-def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
+class ConnectionProxy:
+    """
+    Proxy wrapper around a shared process-level sqlite3.Connection (Option A).
+    Acquires _db_lock on creation to enforce single-writer safety across threads,
+    and releases _db_lock when .close() is called or context exits without closing
+    the shared underlying connection.
+    """
+    def __init__(self, raw_conn: sqlite3.Connection, lock: threading.RLock):
+        self._raw_conn = raw_conn
+        self._lock = lock
+        self._closed = False
+        self._lock.acquire()
+
+    def execute(self, *args, **kwargs):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return self._raw_conn.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return self._raw_conn.executemany(*args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return self._raw_conn.executescript(*args, **kwargs)
+
+    def commit(self):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return self._raw_conn.commit()
+
+    def rollback(self):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return self._raw_conn.rollback()
+
+    def cursor(self, *args, **kwargs):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return self._raw_conn.cursor(*args, **kwargs)
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self._lock.release()
+
+    def __enter__(self):
+        if self._closed:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if not self._closed:
+                if exc_type is None:
+                    self._raw_conn.commit()
+                else:
+                    self._raw_conn.rollback()
+        finally:
+            self.close()
+
+    def __del__(self):
+        if not getattr(self, "_closed", True):
+            self.close()
+
+    @property
+    def row_factory(self):
+        return self._raw_conn.row_factory
+
+    @row_factory.setter
+    def row_factory(self, val):
+        self._raw_conn.row_factory = val
+
+    def __getattr__(self, name: str):
+        if self._closed and name not in ("_raw_conn", "_lock", "_closed"):
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+        return getattr(self._raw_conn, name)
+
+
+def _normalize_db_path(db_path: str | None = None) -> str:
     if db_path is None:
         db_path = os.getenv("CERTOPS_DB_PATH", os.getenv("DB_PATH", "./certops.db"))
-    conn = sqlite3.connect(db_path, timeout=10.0)
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
-    run_migrations(conn)
-    return conn
+    return os.path.normcase(os.path.abspath(str(db_path)))
+
+
+def get_db_connection(db_path: str | None = None) -> ConnectionProxy:
+    abs_path = _normalize_db_path(db_path)
+    with _db_lock:
+        conn = _db_connections.get(abs_path)
+        if conn is None:
+            conn = sqlite3.connect(abs_path, timeout=10.0, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA busy_timeout = 5000")
+            _db_connections[abs_path] = conn
+    return ConnectionProxy(conn, _db_lock)
+
+
+def close_db_connection(db_path: str | None = None) -> None:
+    abs_path = _normalize_db_path(db_path)
+    with _db_lock:
+        conn = _db_connections.pop(abs_path, None)
+        if conn is not None:
+            import gc
+            gc.collect()
+            try:
+                conn.close()
+            except Exception as exc:
+                logger.warning("Error closing raw db connection for %s: %s", abs_path, exc)
+
+
+def reset_db_connections() -> None:
+    with _db_lock:
+        paths = list(_db_connections.keys())
+        if paths:
+            import gc
+            gc.collect()
+        for abs_path in paths:
+            conn = _db_connections.pop(abs_path, None)
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception as exc:
+                    logger.warning("Error closing raw db connection for %s: %s", abs_path, exc)
 
 
 def bootstrap_default_connectors(db_path: str | None = None) -> None:
@@ -923,12 +1065,12 @@ def get_certificate(
     }
 
 
-def create_group(name: str, description: str = "", db_path: str | None = None) -> int:
+def create_group(name: str, description: str = "", tenant_id: str = "default", db_path: str | None = None) -> int:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "INSERT INTO groups (name, description) VALUES (?, ?)",
-            (name, description),
+            "INSERT INTO groups (name, description, tenant_id) VALUES (?, ?, ?)",
+            (name, description, tenant_id),
         )
         conn.commit()
         return cursor.lastrowid
@@ -940,7 +1082,7 @@ def get_group(group_id: int, db_path: str | None = None) -> dict[str, Any] | Non
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "SELECT id, name, description FROM groups WHERE id = ?",
+            "SELECT id, name, description, tenant_id FROM groups WHERE id = ?",
             (group_id,),
         )
         row = cursor.fetchone()
@@ -948,17 +1090,23 @@ def get_group(group_id: int, db_path: str | None = None) -> dict[str, Any] | Non
         conn.close()
     if not row:
         return None
-    return {"id": row[0], "name": row[1], "description": row[2]}
+    return {"id": row[0], "name": row[1], "description": row[2], "tenant_id": row[3] or "default"}
 
 
-def list_groups(db_path: str | None = None) -> list[dict[str, Any]]:
+def list_groups(tenant_id: str | None = None, db_path: str | None = None) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
-        cursor = conn.execute("SELECT id, name, description FROM groups ORDER BY id")
+        if tenant_id is not None:
+            cursor = conn.execute(
+                "SELECT id, name, description, tenant_id FROM groups WHERE tenant_id = ? ORDER BY id",
+                (tenant_id,),
+            )
+        else:
+            cursor = conn.execute("SELECT id, name, description, tenant_id FROM groups ORDER BY id")
         rows = cursor.fetchall()
     finally:
         conn.close()
-    return [{"id": r[0], "name": r[1], "description": r[2]} for r in rows]
+    return [{"id": r[0], "name": r[1], "description": r[2], "tenant_id": r[3] or "default"} for r in rows]
 
 
 def assign_certificate_group(
@@ -984,6 +1132,7 @@ def create_maintenance_window(
     start_time: Any,
     end_time: Any,
     recurrence: str = "once",
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
     start_iso = _parse_utc_datetime(start_time).isoformat()
@@ -991,8 +1140,8 @@ def create_maintenance_window(
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "INSERT INTO maintenance_windows (group_id, start_time, end_time, recurrence) VALUES (?, ?, ?, ?)",
-            (group_id, start_iso, end_iso, recurrence),
+            "INSERT INTO maintenance_windows (group_id, start_time, end_time, recurrence, tenant_id) VALUES (?, ?, ?, ?, ?)",
+            (group_id, start_iso, end_iso, recurrence, tenant_id),
         )
         conn.commit()
         return cursor.lastrowid
@@ -1000,18 +1149,26 @@ def create_maintenance_window(
         conn.close()
 
 
-def list_maintenance_windows(group_id: int | None = None, db_path: str | None = None) -> list[dict[str, Any]]:
+def list_maintenance_windows(
+    group_id: int | None = None,
+    tenant_id: str | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
+        where_clauses: list[str] = []
+        params: list[Any] = []
         if group_id is not None:
-            cursor = conn.execute(
-                "SELECT id, group_id, start_time, end_time, recurrence FROM maintenance_windows WHERE group_id = ? ORDER BY id",
-                (group_id,),
-            )
-        else:
-            cursor = conn.execute(
-                "SELECT id, group_id, start_time, end_time, recurrence FROM maintenance_windows ORDER BY id"
-            )
+            where_clauses.append("group_id = ?")
+            params.append(group_id)
+        if tenant_id is not None:
+            where_clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        cursor = conn.execute(
+            f"SELECT id, group_id, start_time, end_time, recurrence FROM maintenance_windows{where_sql} ORDER BY id",
+            params,
+        )
         rows = cursor.fetchall()
     finally:
         conn.close()
@@ -1086,13 +1243,14 @@ def list_all_certificates(db_path: str | None = None, tenant_id: str | None = No
 def create_notification_policy(
     group_id: int,
     threshold_days: float,
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "INSERT INTO notification_policies (group_id, threshold_days) VALUES (?, ?)",
-            (group_id, float(threshold_days)),
+            "INSERT INTO notification_policies (group_id, threshold_days, tenant_id) VALUES (?, ?, ?)",
+            (group_id, float(threshold_days), tenant_id),
         )
         conn.commit()
         return cursor.lastrowid
@@ -1100,18 +1258,26 @@ def create_notification_policy(
         conn.close()
 
 
-def list_notification_policies(group_id: int | None = None, db_path: str | None = None) -> list[dict[str, Any]]:
+def list_notification_policies(
+    group_id: int | None = None,
+    tenant_id: str | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
+        where_clauses: list[str] = []
+        params: list[Any] = []
         if group_id is not None:
-            cursor = conn.execute(
-                "SELECT id, group_id, threshold_days FROM notification_policies WHERE group_id = ? ORDER BY threshold_days DESC",
-                (group_id,),
-            )
-        else:
-            cursor = conn.execute(
-                "SELECT id, group_id, threshold_days FROM notification_policies ORDER BY threshold_days DESC"
-            )
+            where_clauses.append("group_id = ?")
+            params.append(group_id)
+        if tenant_id is not None:
+            where_clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        cursor = conn.execute(
+            f"SELECT id, group_id, threshold_days FROM notification_policies{where_sql} ORDER BY threshold_days DESC",
+            params,
+        )
         rows = cursor.fetchall()
     finally:
         conn.close()
@@ -1154,18 +1320,26 @@ def record_notification_sent(
         conn.close()
 
 
-def get_notification_logs(cert_id: str | None = None, db_path: str | None = None) -> list[dict[str, Any]]:
+def get_notification_logs(
+    cert_id: str | None = None,
+    tenant_id: str | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
+        where_clauses: list[str] = []
+        params: list[Any] = []
         if cert_id is not None:
-            cursor = conn.execute(
-                "SELECT id, vault_source, cert_id, policy_id, sent_at FROM notification_log WHERE cert_id = ? ORDER BY id",
-                (cert_id,),
-            )
-        else:
-            cursor = conn.execute(
-                "SELECT id, vault_source, cert_id, policy_id, sent_at FROM notification_log ORDER BY id"
-            )
+            where_clauses.append("cert_id = ?")
+            params.append(cert_id)
+        if tenant_id is not None:
+            where_clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        cursor = conn.execute(
+            f"SELECT id, vault_source, cert_id, policy_id, sent_at FROM notification_log{where_sql} ORDER BY id",
+            params,
+        )
         rows = cursor.fetchall()
     finally:
         conn.close()
@@ -1245,16 +1419,21 @@ def insert_renewal_log(
 
 def get_renewal_logs(
     cert_id: str | None = None,
+    tenant_id: str | None = None,
     db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
-        query = "SELECT * FROM renewal_log"
+        where_clauses: list[str] = []
         params: list[Any] = []
         if cert_id is not None:
-            query += " WHERE cert_id = ?"
+            where_clauses.append("cert_id = ?")
             params.append(cert_id)
-        query += " ORDER BY id"
+        if tenant_id is not None:
+            where_clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        query = f"SELECT * FROM renewal_log{where_sql} ORDER BY id"
         cursor = conn.execute(query, params)
         cols = [description[0] for description in cursor.description]
         return [dict(zip(cols, row)) for row in cursor.fetchall()]
@@ -1273,6 +1452,7 @@ def log_activity(
     actor_email: str | None = None,
     target: str | None = None,
     details: dict[str, Any] | None = None,
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
     # ponytail: No retention/pruning policy yet. Table will grow unbounded.
@@ -1283,8 +1463,8 @@ def log_activity(
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "INSERT INTO activity_log (event_type, actor_user_id, actor_email, target, details, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-            (event_type, actor_user_id, actor_email, target, details_json, now_iso),
+            "INSERT INTO activity_log (event_type, actor_user_id, actor_email, target, details, timestamp, tenant_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (event_type, actor_user_id, actor_email, target, details_json, now_iso, tenant_id),
         )
         conn.commit()
         return cursor.lastrowid
@@ -1297,11 +1477,13 @@ def get_activity_logs(
     offset: int = 0,
     event_type: str | None = None,
     admin_only: bool = False,
+    tenant_id: str | None = None,
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Paginated activity log query.
     When admin_only=False (viewer), excludes _ADMIN_ONLY_EVENTS.
+    Filters by tenant_id when provided.
     Returns {"items": [...], "total": int}.
     """
     conn = get_db_connection(db_path)
@@ -1317,6 +1499,10 @@ def get_activity_logs(
         if event_type is not None:
             where_clauses.append("event_type = ?")
             params.append(event_type)
+
+        if tenant_id is not None:
+            where_clauses.append("tenant_id = ?")
+            params.append(tenant_id)
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 

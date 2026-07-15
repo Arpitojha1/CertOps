@@ -7,6 +7,14 @@ run_renewal_loop exits cleanly with 0 actions even if CONNECTOR_1_TYPE=hashicorp
 import os
 import tempfile
 import unittest
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-agent"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db, main
 
@@ -19,11 +27,11 @@ class TestGate7ConfigDivergence(unittest.TestCase):
         os.environ["DB_PATH"] = self.db_path
         os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
         # Ensure fresh tables
-        conn = db.get_db_connection(self.db_path)
-        conn.close()
+        db.run_migrations(self.db_path)
 
     def tearDown(self):
         os.environ.pop("SKIP_DEFAULT_CONNECTORS", None)
+        db.close_db_connection(self.db_path)
         try:
             os.unlink(self.db_path)
         except Exception:

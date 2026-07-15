@@ -8,8 +8,13 @@ import sys
 import unittest
 from pathlib import Path
 
-# Add src/ to sys.path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Ensure package root and src are on path
+_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_root))
+sys.path.insert(0, str(_root / "src"))
+_sibling = _root.parent / "certops-dashboard"
+if _sibling.exists() and str(_sibling) not in sys.path:
+    sys.path.insert(0, str(_sibling))
 
 from src import db
 from src import host_connector
