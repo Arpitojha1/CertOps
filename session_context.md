@@ -774,7 +774,7 @@ RENEWAL LOOP SUMMARY: 0 checked, 0 renewed (no active connectors in DB)
 
 ### Changes Made
 1. Extracted all table creations and idempotent column migrations from `get_db_connection()` into `run_migrations(db_path_or_conn=None)` in `src/db.py`.
-2. Guarded `run_migrations` with `PRAGMA user_version` (`CURRENT_SCHEMA_VERSION = 1`). If `PRAGMA user_version >= CURRENT_SCHEMA_VERSION`, `run_migrations` returns immediately without running any schema inspection or DDL.
+2. Guarded `run_migrations` with `PRAGMA user_version` (`CURRENT_SCHEMA_VERSION = 2`). If `PRAGMA user_version >= CURRENT_SCHEMA_VERSION`, `run_migrations` returns immediately without running any schema inspection or DDL.
 3. Called `db.run_migrations()` explicitly at FastAPI startup (`src/api.py`) and Celery worker ready (`src/tasks.py:on_worker_ready`).
 4. Included `# ponytail: manual PRAGMA user_version check is sufficient for additive schema changes; deferred Alembic until complex migrations needed.` comment.
 
@@ -832,218 +832,13 @@ RESPONSE: {
 
 ---
 
-## Phase 2 Outstanding Technical Debt: Incomplete Multi-Tenant Read Scoping (Gate 5 Audit Gap)
+## Phase 2 Outstanding Technical Debt: Tenant Ownership Validation on Mutating Endpoints
 
 > [!WARNING]
 > **Explicit Open Item for Phase 2 Multi-Tenancy Exit Criteria**
-> Currently, `tenant_id` filtering is wired into only 4 read endpoints (`GET /api/certificates`, `GET /api/certificates/due`, `GET /api/certificates/{vault_source}/{name}`, `GET /api/connectors`).
-
-### Unscoped Read Endpoints (Must be scoped before Phase 2 completion)
-The following 7 authenticated GET endpoints currently return global data across all tenants and must be updated to filter by `_get_tenant_scope(current_user)`:
-1. `GET /api/activity-log`
-2. `GET /api/renewal-log`
-3. `GET /api/groups`
-4. `GET /api/maintenance-windows`
-5. `GET /api/notification-policies`
-6. `GET /api/notification-log`
-7. `GET /api/scheduler/status`
-
-Additionally, all mutating endpoints (`POST`, `PUT`, `PATCH`, `DELETE`) currently enforce `require_admin` role but do not verify that the target entity belongs to the caller's `tenant_id` or `org_id`.
-
----
-
-## Stage 2 Pre-Coding Questions
-
-### 1. Roles
-- **Confirmed Role Set for v1**: `admin` and `viewer` only. No third role is implied in the codebase.
-- **Existing references to roles/permissions in codebase** (grep output across `src/`):
-  ```
-  src/api.py:136:    if current_user.get("role") == "admin":
-  src/api.py:203:    is_admin = current_user.get("role") == "admin"
-  src/auth.py:47:def _make_token(user_id: int, email: str, role: str, tenant_id: str = "default") -> str:
-  src/auth.py:49:    payload = {"sub": str(user_id), "email": email, "role": role, "tenant_id": tenant_id, "exp": expire}
-  src/auth.py:77:    if current_user.get("role") != "admin":
-  src/auth.py:90:    role: str = "viewer"
-  src/auth.py:99:    token = _make_token(user["id"], user["email"], user["role"], tenant_id=tid)
-  src/auth.py:102:    return {"id": user["id"], "email": user["email"], "role": user["role"], "tenant_id": tid}
-  src/auth.py:123:    if body.role not in ("admin", "viewer"):
-  src/auth.py:143:    if body.role not in ("admin", "viewer"):
-  src/db.py:180:                role TEXT NOT NULL DEFAULT 'viewer',
-  src/db.py:295:    role: str = "viewer",
-  src/seed_admin.py:38:uid = db.create_user(ADMIN_EMAIL, auth.hash_password(ADMIN_PASSWORD), role="admin")
-  ```
-- **Proposed Role Set**: Exactly `admin` (full read + mutating access) and `viewer` (read-only access).
-
-### 2. Session Mechanism
-- **Selected Mechanism**: **JWT (stateless)** signed with HMAC-SHA256 (`HS256`) using dedicated secret `JWT_SECRET`, stored in an HTTP-only, `SameSite=Strict` cookie (`certops_token`).
-- **Why**: `JWT_SECRET` is already documented in `.env.example`, `RUNBOOK.md`, and implemented in `src/auth.py`.
-- **Grep output for `JWT_SECRET` references across repository**:
-  ```
-  .env.example:6:JWT_SECRET=change-me-to-a-random-256-bit-hex-string
-  RUNBOOK.md:14:Required env vars: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `JWT_SECRET`.
-  src/auth.py:24:JWT_SECRET = os.getenv("JWT_SECRET", "change-me-before-any-external-access")
-  src/auth.py:50:    return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-  src/auth.py:55:        data = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-  ```
-
-### 3. Password Storage
-- **Confirmed Hashing Library/Algorithm**: `bcrypt` (`bcrypt.hashpw` with salt rounds=12).
-- **Relevant dependency file contents (`requirements.txt`)**:
-  ```
-  azure-identity
-  azure-keyvault-certificates
-  bcrypt
-  cryptography
-  fastapi
-  paramiko
-  PyJWT
-  python-dotenv
-  pywinrm
-  requests
-  uvicorn[standard]
-  celery
-  redis
-  ```
-  Both `bcrypt` (line 3) and `PyJWT` (line 7) are already installed dependencies.
-
-### 4. Tenant Column State
-- **Live Schema Output** from `sqlite_master` in `certops.db` confirming `tenant_id` is already present on `users`, `certificates`, and `connectors`:
-  ```sql
-  CREATE TABLE users (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              email TEXT UNIQUE NOT NULL,
-              password_hash TEXT NOT NULL,
-              role TEXT NOT NULL DEFAULT 'viewer',
-              created_at TEXT NOT NULL
-          , tenant_id TEXT DEFAULT 'default')
-  ```
-  ```sql
-  CREATE TABLE certificates (
-              vault_source TEXT NOT NULL,
-              name TEXT NOT NULL,
-              ...
-              tenant_id TEXT DEFAULT 'default',
-              PRIMARY KEY (vault_source, name)
-          )
-  ```
-  ```sql
-  CREATE TABLE connectors (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT UNIQUE NOT NULL,
-              category TEXT NOT NULL,
-              ...
-              tenant_id TEXT DEFAULT 'default')
-  ```
-
-### 5. Existing Auth Code
-- **Verbatim current implementation** of `get_current_user` and `require_admin` in `src/auth.py` (lines 70–80):
-  ```python
-  def get_current_user(token: Optional[str] = Cookie(default=None, alias=COOKIE_NAME)) -> dict:
-      if not token:
-          raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-      return _decode_token(token)
-
-
-  def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
-      if current_user.get("role") != "admin":
-          raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-      return current_user
-  ```
-
-### 6. Endpoint Inventory
-Complete list of all API endpoints across `src/auth.py` and `src/api.py`, categorized by method, read vs. mutating, and minimum protection level required per Stage 2:
-
-| Endpoint | Method | Type | Current Protection | Target Stage 2 Protection Level |
-|---|---|---|---|---|
-| `/auth/login` | POST | Mutating | Public | Public (Authentication Endpoint) |
-| `/auth/me` | GET | Read | `get_current_user` | `require_authenticated` (`get_current_user`) |
-| `/auth/logout` | POST | Mutating | Public | Public / Clear Cookie |
-| `/auth/signup` | POST | Mutating | `require_admin` | `require_admin` |
-| `/auth/invites` | POST | Mutating | `require_admin` | `require_admin` |
-| `/auth/register-with-invite` | POST | Mutating | Public | Public (Invite redemption) |
-| `/api/health` | GET | Read | Public | Public / Health probe |
-| `/api/certificates` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/certificates/due` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/certificates/{vault_source}/{name}` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/renewal-log` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/activity-log` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/connectors` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/connectors` | POST | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/connectors/{connector_id}` | PUT | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/connectors/{connector_id}` | PATCH | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/connectors/{connector_id}` | DELETE | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/connectors/{connector_id}/test` | POST | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/groups` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/groups` | POST | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/certificates/assign-group` | POST | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/maintenance-windows` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/maintenance-windows` | POST | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/notification-policies` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/notification-policies` | POST | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/notification-policies/{policy_id}` | DELETE | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-| `/api/notification-log` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/scheduler/status` | GET | Read | `get_current_user` | `require_authenticated` + Tenant Scoped |
-| `/api/host/confirm-reload` | POST | Mutating | `require_admin` | `require_admin` + Tenant Scoped |
-
----
-
----
-
-## Gate H: Start `RenewalScheduler` from FastAPI Lifecycle
-
-### Architectural Decision
-- Selected **Option (b)**: `RenewalScheduler.job_callback` is wired to a logging-only shim (`_event_driven_scheduler_callback`) that records `RenewalScheduler due job detected; Celery Beat owns actual triggering.`.
-- Celery Beat continues to own periodic due-cert scanning and pipeline triggering to prevent double-triggering.
-
-### Changes Made
-1. Added `@app.on_event("startup")` instantiation of `RenewalScheduler` (`sched.start()`) stored on `app.state.scheduler`.
-2. Added `@app.on_event("shutdown")` cleanup hook calling `sched.stop()`.
-3. Updated `GET /api/scheduler/status` to return `isRunning: bool` reflecting whether the in-process event-driven scheduler thread is alive.
-
-### Gate H Evidence (Raw Log Output)
-Ran FastAPI lifecycle startup, hit `GET /api/scheduler/status`, and executed shutdown:
-```
-2026-07-14 01:39:59,481 [INFO] RenewalScheduler started (event-driven mode, DB-backed recovery).
-2026-07-14 01:39:59,490 [INFO] RenewalScheduler due job detected; Celery Beat owns actual triggering.
---- STARTING SERVER ---
---- HITTING GET /api/scheduler/status ---
-STATUS: 200
-RESPONSE: {
-  "isRunning": true,
-  "nextJob": ...,
-  "upcoming": ...,
-  "recentEvents": ...
-}
---- STOPPING SERVER ---
-2026-07-14 01:40:09,287 [INFO] RenewalScheduler stopped.
---- SERVER STOPPED ---
-```
-
----
-
-## Gate 5: Live Pipeline + Worker Kill
-
-> Gate 5 (live pipeline + worker kill): PENDING — could not run, step-ca service not available on this machine (`https://localhost:8443` actively refused connection). Must be run on primary dev machine before TRD.md's Celery-pipeline debt row can be upgraded from "Partially verified" to "Resolved."
-
----
-
-## Phase 2 Outstanding Technical Debt: Incomplete Multi-Tenant Read Scoping (Gate 5 Audit Gap)
-
-> [!WARNING]
-> **Explicit Open Item for Phase 2 Multi-Tenancy Exit Criteria**
-> Currently, `tenant_id` filtering is wired into only 4 read endpoints (`GET /api/certificates`, `GET /api/certificates/due`, `GET /api/certificates/{vault_source}/{name}`, `GET /api/connectors`).
-
-### Unscoped Read Endpoints (Must be scoped before Phase 2 completion)
-The following 7 authenticated GET endpoints currently return global data across all tenants and must be updated to filter by `_get_tenant_scope(current_user)`:
-1. `GET /api/activity-log`
-2. `GET /api/renewal-log`
-3. `GET /api/groups`
-4. `GET /api/maintenance-windows`
-5. `GET /api/notification-policies`
-6. `GET /api/notification-log`
-7. `GET /api/scheduler/status`
-
-Additionally, all mutating endpoints (`POST`, `PUT`, `PATCH`, `DELETE`) currently enforce `require_admin` role but do not verify that the target entity belongs to the caller's `tenant_id` or `org_id`.
+> Read endpoint scoping is complete (all 7 endpoints now filter by `_get_tenant_scope(current_user)`).
+> However, all mutating endpoints (`POST`, `PUT`, `PATCH`, `DELETE`) currently enforce `require_admin` role
+> but do not verify that the target entity belongs to the caller's `tenant_id` or `org_id`.
 
 ---
 
@@ -1359,8 +1154,8 @@ To avoid circular reasoning (where sum of post-split halves `27+30=57` is self-r
    - Track D (`test_verify_fingerprint_rigor.py`): `+3 tests` (Agent).
    - Track D (`test_tier2_sqlite_concurrency.py` additions): `+2 tests` (Agent).
 3. **Reconciled True Baseline Total:** `47 pre-split` + `19 newly added across tracks` = **66 tests collected** (`57 passed, 9 skipped`).
-4. **Why `task-329` (Prior Session Summary) Reported `65 passed, 10 skipped (75 collected)`:**
-   Inspection of `task-329.log` (`C:/Users/Arpit/.gemini/antigravity/brain/546b0d3f-1629-4a33-8657-b82e9dbbecb9/.system_generated/tasks/task-329.log`, lines 16 & 88) confirmed that `task-329` actually collected `35 items` in `certops-agent/tests/` (`27 passed, 8 skipped`) and `31 items` in `certops-dashboard/tests/` (`30 passed, 1 skipped`), exactly `66 collected`. However, when authoring the markdown summary block in Step 332 (`task-329` report), the author mis-transcribed `collected 35 items` (`27 passed, 8 skipped` + `1 skipped` in dashboard = `9 skipped total`) as `35 passed, 9 skipped` in the `certops-agent` section. That manual transcription error (`35 passed` instead of `27 passed`) created the phantom `75 collected` / `65 passed` figure.
+4. **Why the Prior Session Summary Reported `65 passed, 10 skipped (75 collected)` — Unverifiable Claim:**
+   The strings "75 collected", "65 passed", and "10 skipped" do not appear in any raw pytest execution output on disk — not in `task-329.log` (which actually recorded `66 collected` / `57 passed` / `9 skipped`), nor in any other `.log` or `.jsonl` test output file. The numbers first appear in a human-authored pushback message (transcript step 506) and in a subagent-generated markdown summary (step 332) that cited `35 passed, 9 skipped` for `certops-agent` — a figure that does not match any real pytest run. A plausible transcription-error explanation (confusing "collected 35 items" with "35 passed") was constructed after the fact, but this remains inference, not evidence. The honest status is: the source of "75 collected" / "65 passed" / "10 skipped" could not be located in any verifiable log, and the number should be treated as an unverifiable claim rather than a known baseline.
 
 | Metric | Historical Pre-Split (`4095697`) | Plus Tracks B/C/D Additions | Reconciled True Baseline (`66 collected`) | Current Post-Split (`certops-agent`) | Current Post-Split (`certops-dashboard`) | Total Post-Split Combined (`HEAD`) | Parity Verdict |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
