@@ -1380,5 +1380,99 @@ All 9 skipped tests are live integration checks requiring external network infra
 | `certops-agent\tests\test_tier1_tasks_integration.py:28` | `TestTier1TasksIntegration::test_full_tasks_pipeline_closed_loop` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
 | `certops-dashboard\tests\test_audit_log.py:31` (`unittest.py:523`) | `test_audit_log_smoke` | `Live integration smoke test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
 
+### Step 6: Finding 6 — Fixture Realism Evidence Documentation
+All required fixtures from `session_context.md §3b` are rigorously constructed and tested inside `certops-agent/tests/test_telemetry_push.py`:
+
+#### 1. 728-Day Future Expiry & Multi-Connector Batch (`vault`, `azure_kv`, `ssh`, `winrm`)
+- **Test Method:** `TestTelemetryPush.test_01_fixtures_and_programmatic_allow_list_check` (`lines 118-192`)
+- **Fixture Construction Snippet:**
+```python
+now_utc = datetime.now(timezone.utc)
+future_728_days = (now_utc + timedelta(days=728)).isoformat()
+
+batch_state = [
+    {
+        "connector_type": "vault",
+        "connector_opaque_id": "conn-vault-sha256-a1b2",
+        "connector_health": "ok",
+        "connector_status": "Healthy secret store connection",
+        "error_code": None,
+        "cert_cn": "vault-cert.local",
+        "cert_san": ["www.vault-cert.local", "api.vault-cert.local"],
+        "expiry_utc": future_728_days,
+        "renewal_stage": "healthy"
+    },
+    # ... includes azure_kv (30d), ssh (10d), winrm (error state) ...
+]
+```
+- **Assertion Snippet:**
+```python
+payload = push_client.build_payload(batch_state)
+self.assertEqual(len(payload["items"]), 4)
+allow_violations = check_payload_allow_list(payload)
+self.assertEqual(allow_violations, [], f"Allow-list violations found: {allow_violations}")
+```
+
+#### 2. Error State Sanitization (Zero Exception Strings / Credentials Crossing Wire)
+- **Test Method:** `TestTelemetryPush.test_05_error_state_sanitization` (`lines 302-326`)
+- **Fixture Construction Snippet:**
+```python
+raw_exception_str = "ConnectionRefusedError: [WinError 10061] Failed connecting to 192.168.1.50:5985 with password 'sre-password-123'"
+sanitized_item = agent_telemetry.sanitize_connector_error(
+    connector_type="winrm",
+    connector_opaque_id="conn-winrm-sha256-9999",
+    raw_error_message=raw_exception_str,
+    cert_cn="winrm-host.local",
+    expiry_utc="2026-08-01T00:00:00Z",
+    renewal_stage="overdue"
+)
+```
+- **Assertion Snippet:**
+```python
+self.assertEqual(sanitized_item["connector_health"], "error")
+self.assertEqual(sanitized_item["error_code"], "ERR_CONNECTOR_UNREACHABLE")
+deny_violations = check_payload_deny_list(sanitized_item)
+self.assertEqual(deny_violations, [], f"Sanitized error item contained deny-listed data: {deny_violations}")
+self.assertNotIn("sre-password", sanitized_item["connector_status"])
+self.assertNotIn("192.168.1.50", sanitized_item["connector_status"])
+```
+
+#### 3. Revoked / Invalid Token Push Attempt (`401/403` Rejection)
+- **Test Method:** `TestTelemetryPush.test_03_revoked_or_invalid_token_push_attempt` (`lines 230-260`)
+- **Fixture Construction Snippet:**
+```python
+telemetry_ingest.register_agent_token("revoked-token-456", scope="telemetry_push", revoked=True)
+payload = {"agent_id": "agent-001", "agent_version": "1.0.0", "timestamp": "2026-07-15T03:30:00Z", "items": []}
+```
+- **Assertion Snippet:**
+```python
+response_revoked = self.client.post(
+    "/api/telemetry/ingest",
+    headers={"Authorization": "Bearer revoked-token-456"},
+    json=payload
+)
+self.assertIn(response_revoked.status_code, [401, 403], f"Expected 401/403, got {response_revoked.status_code}")
+self.assertIn("revoked", response_revoked.json().get("detail", "").lower())
+```
+
+#### 4. Clock Skew Between Agent and Dashboard
+- **Test Method:** `TestTelemetryPush.test_04_clock_skew_handling` (`lines 261-301`)
+- **Fixture Construction Snippet:**
+```python
+now_utc = datetime.now(timezone.utc)
+# Agent clock is skewed 2 hours behind server time
+skewed_timestamp = (now_utc - timedelta(hours=2)).isoformat()
+payload = {"agent_id": "agent-skewed", "agent_version": "1.0.0", "timestamp": skewed_timestamp, "items": [...]}
+```
+- **Assertion Snippet:**
+```python
+response = self.client.post("/api/telemetry/ingest", headers={"Authorization": "Bearer valid-agent-token-123"}, json=payload)
+self.assertEqual(response.status_code, 202, f"Expected 202 for skewed timestamp, got {response.status_code}")
+received = telemetry_ingest.get_received_payloads()
+self.assertEqual(received[0]["payload"]["timestamp"], skewed_timestamp)
+self.assertIsNotNone(received[0].get("server_received_at"))
+```
+
+
 
 
