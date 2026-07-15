@@ -1276,3 +1276,76 @@ Verified live `celery worker` startup (`--pool=solo`) inside `certops-agent/`, c
 [2026-07-15 08:42:03,573: INFO/MainProcess] celery@Arpits-Lappy ready.
 ```
 
+### Step 4: Finding 2 — Literal Track C Payload & Contract Diff Evidence
+**Verbatim Captured JSON Payload from Real Push Client (`agent_telemetry.build_payload()`):**
+```json
+{
+  "agent_id": "agent-prod-us-east-1",
+  "agent_version": "1.0.0",
+  "timestamp": "2026-07-15T03:12:47.789353+00:00",
+  "items": [
+    {
+      "connector_type": "vault",
+      "connector_opaque_id": "conn-vault-sha256-a1b2",
+      "connector_health": "ok",
+      "connector_status": "Healthy secret store connection",
+      "error_code": null,
+      "cert_cn": "vault-cert.local",
+      "cert_san": [
+        "www.vault-cert.local",
+        "api.vault-cert.local"
+      ],
+      "expiry_utc": "2028-07-12T03:12:47.789321+00:00",
+      "renewal_stage": "healthy"
+    },
+    {
+      "connector_type": "azure_kv",
+      "connector_opaque_id": "conn-azure-sha256-c3d4",
+      "connector_health": "ok",
+      "connector_status": "Healthy Azure KV connection",
+      "error_code": null,
+      "cert_cn": "azure-cert.local",
+      "cert_san": [],
+      "expiry_utc": "2026-08-14T03:12:47.789321+00:00",
+      "renewal_stage": "healthy"
+    },
+    {
+      "connector_type": "ssh",
+      "connector_opaque_id": "conn-ssh-sha256-e5f6",
+      "connector_health": "ok",
+      "connector_status": "SSH deploy check passed",
+      "error_code": null,
+      "cert_cn": "ssh-host.local",
+      "cert_san": [
+        "host1.local"
+      ],
+      "expiry_utc": "2026-07-25T03:12:47.789321+00:00",
+      "renewal_stage": "due_soon"
+    },
+    {
+      "connector_type": "winrm",
+      "connector_opaque_id": "conn-winrm-sha256-7890",
+      "connector_health": "error",
+      "connector_status": "Connection timed out during host check",
+      "error_code": "ERR_CONNECTION_TIMEOUT",
+      "cert_cn": "winrm-host.local",
+      "cert_san": [],
+      "expiry_utc": "2026-07-16T03:12:47.789321+00:00",
+      "renewal_stage": "overdue"
+    }
+  ]
+}
+```
+
+**Programmatic Contract Diff Output (Field-by-Field Audit against `TELEMETRY_CONTRACT.md`):**
+```text
+Allow-list check violations count: 0
+  -> 0 allow-list violations
+Deny-list check violations count: 0
+  -> 0 deny-list violations
+
+SUCCESS: 0 violations. Real payload matches TELEMETRY_CONTRACT exactly.
+```
+All fields present are strictly allow-listed (`agent_id`, `agent_version`, `timestamp`, `items`, `connector_type`, `connector_opaque_id`, `connector_health`, `connector_status`, `error_code`, `cert_cn`, `cert_san`, `expiry_utc`, `renewal_stage`). Zero deny-listed patterns (`PRIVATE KEY`, `secret/data/`, passwords, IP addresses, raw hostnames, stack traces) cross the wire.
+
+
