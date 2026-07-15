@@ -1348,4 +1348,37 @@ SUCCESS: 0 violations. Real payload matches TELEMETRY_CONTRACT exactly.
 ```
 All fields present are strictly allow-listed (`agent_id`, `agent_version`, `timestamp`, `items`, `connector_type`, `connector_opaque_id`, `connector_health`, `connector_status`, `error_code`, `cert_cn`, `cert_san`, `expiry_utc`, `renewal_stage`). Zero deny-listed patterns (`PRIVATE KEY`, `secret/data/`, passwords, IP addresses, raw hostnames, stack traces) cross the wire.
 
+### Step 5: Finding 5 — Baseline Parity & Test Suite Audit Table
+**Pre-Split Baseline vs. Post-Split Partitioned Test Counts:**
+- **Pre-Split Baseline (from Track D initial Stage E review):** `57 passed, 9 skipped` (`66 collected`).
+- **Post-Split `certops-agent/tests/` (`PYTHONPATH="c:\Users\Arpit\certOps\certops-agent"`):** `27 passed, 8 skipped` (`35 collected`).
+- **Post-Split `certops-dashboard/tests/` (`PYTHONPATH="c:\Users\Arpit\certOps\certops-dashboard"`):** `30 passed, 1 skipped` (`31 collected`).
+- **Total Combined Post-Split:** `57 passed, 9 skipped` (`66 collected`). Exact 1:1 parity with zero regressions, zero test loss, and exact package boundary isolation.
+
+**Partitioned Test Execution Logs:**
+`certops-agent/tests/` Run Summary:
+```text
+================= 27 passed, 8 skipped, 5 warnings in 17.90s ==================
+```
+`certops-dashboard/tests/` Run Summary:
+```text
+================ 30 passed, 1 skipped, 113 warnings in 21.25s =================
+```
+
+**Skipped Tests Audit Table (`pytest -rs` Summary Across Both Suites):**
+All 9 skipped tests are live integration checks requiring external network infrastructure (`step-ca` CA container, HashiCorp Vault container, live SSH daemon, or running Celery worker queue inside a live integration environment). Every skipped test is gated by the environment variable `CERTOPS_RUN_LIVE=1` (`if os.getenv("CERTOPS_RUN_LIVE") != "1": skip(...)`).
+
+| Test File & Line | Skipped Test Name | Skip Reason Reported by `-rs` | Gating Environment Variable |
+| :--- | :--- | :--- | :--- |
+| `certops-agent\tests\test_celery_crash_recovery.py:41` | `TestCeleryCrashRecovery::test_kill_worker_mid_pipeline_and_resume_from_db` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-agent\tests\test_core_loop.py:38` | `TestCoreLoopSmoke::test_01_core_loop_renewal_triggered_and_verified` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-agent\tests\test_core_loop.py:53` | `TestCoreLoopSmoke::test_02_core_loop_no_renewal_when_outside_threshold` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-agent\tests\test_host_connector.py:37` | `TestHostConnector::test_01_ssh_host_connector_discover_and_read` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-agent\tests\test_host_connector.py:53` | `TestHostConnector::test_02_ssh_host_connector_pipeline_and_reload_verification` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-agent\tests\test_host_connector.py:85` | `TestHostConnector::test_03_winrm_host_connector_conformance` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-agent\tests\test_multi_cert_loop.py:101` | `TestMultiCertLoopLive::test_multi_cert_loop_and_error_isolation` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-agent\tests\test_tier1_tasks_integration.py:28` | `TestTier1TasksIntegration::test_full_tasks_pipeline_closed_loop` | `Live integration test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+| `certops-dashboard\tests\test_audit_log.py:31` (`unittest.py:523`) | `test_audit_log_smoke` | `Live integration smoke test; set CERTOPS_RUN_LIVE=1 to run in a sandbox` | `CERTOPS_RUN_LIVE=1` |
+
+
 
