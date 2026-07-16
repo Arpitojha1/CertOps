@@ -1334,15 +1334,59 @@ def has_notification_been_sent(
 def record_notification_sent(
     vault_source: str,
     cert_id: str,
-    policy_id: int,
+    policy_id: int | None = None,
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection(db_path)
     try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vault_source TEXT,
+                cert_id TEXT,
+                policy_id INTEGER,
+                sent_at TEXT NOT NULL,
+                tenant_id TEXT DEFAULT 'default'
+            )
+            """
+        )
+        try:
+            conn.execute("ALTER TABLE notification_log ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+        except sqlite3.OperationalError:
+            pass
         cursor = conn.execute(
-            "INSERT INTO notification_log (vault_source, cert_id, policy_id, sent_at) VALUES (?, ?, ?, ?)",
-            (vault_source, cert_id, policy_id, now_iso),
+            "INSERT INTO notification_log (vault_source, cert_id, policy_id, sent_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
+            (vault_source, cert_id, policy_id, now_iso, tenant_id),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def log_notification_event(
+    cert_id: str,
+    event_type: str = "renewal_warning",
+    recipient: str | None = None,
+    success: bool = True,
+    message: str | None = None,
+    policy_id: int | None = None,
+    vault_source: str | None = None,
+    tenant_id: str = "default",
+    db_path: str | None = None,
+) -> int:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if vault_source is None and ":" in cert_id:
+        parts = cert_id.split(":", 1)
+        vault_source = parts[0]
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO notification_log (vault_source, cert_id, policy_id, sent_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
+            (vault_source, cert_id, policy_id, now_iso, tenant_id),
         )
         conn.commit()
         return cursor.lastrowid
@@ -1397,6 +1441,8 @@ def insert_renewal_log(
     old_fingerprint: str | None = None,
     new_fingerprint: str | None = None,
     detail: str | None = None,
+    message: str | None = None,
+    tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
     """
@@ -1416,6 +1462,8 @@ def insert_renewal_log(
     if vault_source is None and connector_type is not None:
         vault_source = connector_type
 
+    effective_detail = detail if detail is not None else message
+
     conn = get_db_connection(db_path)
     try:
         conn.execute(
@@ -1433,17 +1481,22 @@ def insert_renewal_log(
                 old_fingerprint TEXT,
                 new_fingerprint TEXT,
                 success BOOLEAN NOT NULL,
-                detail TEXT
+                detail TEXT,
+                tenant_id TEXT DEFAULT 'default'
             )
             """
         )
+        try:
+            conn.execute("ALTER TABLE renewal_log ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+        except sqlite3.OperationalError:
+            pass
         cursor = conn.execute(
             """
             INSERT INTO renewal_log (
                 vault_source, cert_id, timestamp, event_type, connector_category, connector_type,
-                old_expiry, new_expiry, old_fingerprint, new_fingerprint, success, detail
+                old_expiry, new_expiry, old_fingerprint, new_fingerprint, success, detail, tenant_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 vault_source,
@@ -1457,11 +1510,89 @@ def insert_renewal_log(
                 old_fingerprint,
                 new_fingerprint,
                 1 if success else 0,
-                detail,
+                effective_detail,
+                tenant_id,
             ),
         )
         conn.commit()
         return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def log_renewal_event(
+    cert_id: str | None,
+    event_type: str,
+    success: bool,
+    message: str | None = None,
+    detail: str | None = None,
+    vault_source: str | None = None,
+    connector_category: str | None = None,
+    connector_type: str | None = None,
+    old_expiry: Any = None,
+    new_expiry: Any = None,
+    old_fingerprint: str | None = None,
+    new_fingerprint: str | None = None,
+    tenant_id: str = "default",
+    db_path: str | None = None,
+) -> int:
+    return insert_renewal_log(
+        cert_id=cert_id,
+        event_type=event_type,
+        success=success,
+        vault_source=vault_source,
+        connector_category=connector_category,
+        connector_type=connector_type,
+        old_expiry=old_expiry,
+        new_expiry=new_expiry,
+        old_fingerprint=old_fingerprint,
+        new_fingerprint=new_fingerprint,
+        detail=detail,
+        message=message,
+        tenant_id=tenant_id,
+        db_path=db_path,
+    )
+
+
+def register_agent_token(
+    name_or_token: str,
+    token: str | None = None,
+    scope: str = "telemetry_push",
+    tenant_id: str = "default",
+    db_path: str | None = None,
+) -> int:
+    """Register/store a raw token in agent_tokens by computing its SHA-256 hash."""
+    raw_token = token if token is not None else name_or_token
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    now_str = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                scope TEXT NOT NULL DEFAULT 'telemetry_push',
+                created_at TEXT NOT NULL,
+                revoked_at TEXT,
+                connector_context TEXT,
+                tenant_id TEXT DEFAULT 'default'
+            )
+            """
+        )
+        try:
+            conn.execute("ALTER TABLE agent_tokens ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+        except sqlite3.OperationalError:
+            pass
+        cur = conn.execute(
+            """
+            INSERT INTO agent_tokens (token_hash, scope, created_at, revoked_at, connector_context, tenant_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (token_hash, scope, now_str, None, None, tenant_id),
+        )
+        conn.commit()
+        return cur.lastrowid
     finally:
         conn.close()
 
