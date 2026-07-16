@@ -149,3 +149,155 @@ class TestResolveHostConnector(unittest.TestCase):
         row = {"name": "azure-kv", "category": "azure", "config": "{}", "renewal_threshold_days": 30.0}
         with self.assertRaises(RuntimeError):
             connector_registry.resolve_host_connector(row)
+
+
+class TestProbeEnvVars(unittest.TestCase):
+    def setUp(self):
+        self._orig = {k: os.environ.get(k) for k in [
+            "VAULT_ADDR", "VAULT_TOKEN",
+            "AZURE_KEYVAULT_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+        ]}
+        for k in self._orig:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._orig.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_no_env_vars_returns_empty(self):
+        result = connector_registry.probe_env_vars()
+        self.assertEqual(result, [])
+
+    def test_vault_env_vars_returns_hashicorp(self):
+        os.environ["VAULT_ADDR"] = "http://vault:8200"
+        os.environ["VAULT_TOKEN"] = "test-token"
+        result = connector_registry.probe_env_vars()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "hashicorp")
+        self.assertEqual(result[0]["category"], "hashicorp")
+        self.assertEqual(result[0]["config"]["url"], "http://vault:8200")
+        self.assertEqual(result[0]["config"]["token"], "test-token")
+
+    def test_azure_env_vars_returns_azure(self):
+        os.environ["AZURE_KEYVAULT_URL"] = "https://my-vault.vault.azure.net"
+        os.environ["AZURE_TENANT_ID"] = "tenant-123"
+        os.environ["AZURE_CLIENT_ID"] = "client-456"
+        os.environ["AZURE_CLIENT_SECRET"] = "secret-789"
+        result = connector_registry.probe_env_vars()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "azure")
+        self.assertEqual(result[0]["category"], "azure")
+        self.assertEqual(result[0]["config"]["keyvault_url"], "https://my-vault.vault.azure.net")
+
+    def test_both_env_vars_returns_both(self):
+        os.environ["VAULT_ADDR"] = "http://vault:8200"
+        os.environ["VAULT_TOKEN"] = "test-token"
+        os.environ["AZURE_KEYVAULT_URL"] = "https://my-vault.vault.azure.net"
+        os.environ["AZURE_TENANT_ID"] = "tenant-123"
+        os.environ["AZURE_CLIENT_ID"] = "client-456"
+        os.environ["AZURE_CLIENT_SECRET"] = "secret-789"
+        result = connector_registry.probe_env_vars()
+        self.assertEqual(len(result), 2)
+        names = {r["name"] for r in result}
+        self.assertEqual(names, {"hashicorp", "azure"})
+
+    def test_vault_addr_only_returns_hashicorp(self):
+        os.environ["VAULT_ADDR"] = "http://vault:8200"
+        result = connector_registry.probe_env_vars()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "hashicorp")
+        self.assertIsNone(result[0]["config"]["token"])
+
+    def test_azure_incomplete_returns_azure(self):
+        os.environ["AZURE_KEYVAULT_URL"] = "https://my-vault.vault.azure.net"
+        result = connector_registry.probe_env_vars()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "azure")
+
+
+class TestSeedConnectorsFromEnv(unittest.TestCase):
+    def setUp(self):
+        self._orig_db = os.environ.get("CERTOPS_DB_PATH")
+        self._orig = {k: os.environ.get(k) for k in [
+            "VAULT_ADDR", "VAULT_TOKEN",
+            "AZURE_KEYVAULT_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+            "SKIP_DEFAULT_CONNECTORS",
+        ]}
+        for k in self._orig:
+            os.environ.pop(k, None)
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.test_db = self._tmp.name
+        self._tmp.close()
+        os.environ["CERTOPS_DB_PATH"] = self.test_db
+        os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+        from src import db
+        db.run_migrations(self.test_db)
+
+    def tearDown(self):
+        from src import db
+        if self._orig_db is not None:
+            os.environ["CERTOPS_DB_PATH"] = self._orig_db
+        else:
+            os.environ.pop("CERTOPS_DB_PATH", None)
+        for k, v in self._orig.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        db.close_db_connection(self.test_db)
+        try:
+            os.unlink(self.test_db)
+        except Exception:
+            pass
+
+    def test_seed_creates_vault_connector(self):
+        os.environ["VAULT_ADDR"] = "http://vault:8200"
+        os.environ["VAULT_TOKEN"] = "test-token"
+        seeded = connector_registry.seed_connectors_from_env(db_path=self.test_db)
+        self.assertEqual(seeded, ["hashicorp"])
+        from src import db
+        row = db.get_connector_by_name("hashicorp", db_path=self.test_db)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["category"], "hashicorp")
+
+    def test_seed_creates_azure_connector(self):
+        os.environ["AZURE_KEYVAULT_URL"] = "https://my-vault.vault.azure.net"
+        os.environ["AZURE_TENANT_ID"] = "tenant-123"
+        os.environ["AZURE_CLIENT_ID"] = "client-456"
+        os.environ["AZURE_CLIENT_SECRET"] = "secret-789"
+        seeded = connector_registry.seed_connectors_from_env(db_path=self.test_db)
+        self.assertEqual(seeded, ["azure"])
+        from src import db
+        row = db.get_connector_by_name("azure", db_path=self.test_db)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["category"], "azure")
+
+    def test_seed_is_idempotent(self):
+        os.environ["VAULT_ADDR"] = "http://vault:8200"
+        os.environ["VAULT_TOKEN"] = "test-token"
+        seeded1 = connector_registry.seed_connectors_from_env(db_path=self.test_db)
+        self.assertEqual(seeded1, ["hashicorp"])
+        seeded2 = connector_registry.seed_connectors_from_env(db_path=self.test_db)
+        self.assertEqual(seeded2, [])
+
+    def test_seed_preserves_existing_connector(self):
+        from src import db
+        db.create_connector(
+            name="hashicorp",
+            category="secret_store",
+            renewal_threshold_days=21.0,
+            config=json.dumps({"url": "https://custom-vault:8200", "token": "custom-token"}),
+            is_active=True,
+            db_path=self.test_db,
+        )
+        os.environ["VAULT_ADDR"] = "http://env-vault:8200"
+        os.environ["VAULT_TOKEN"] = "env-token"
+        seeded = connector_registry.seed_connectors_from_env(db_path=self.test_db)
+        self.assertEqual(seeded, [])
+        row = db.get_connector_by_name("hashicorp", db_path=self.test_db)
+        cfg = db.decrypt_config(row["config"])
+        self.assertEqual(cfg["url"], "https://custom-vault:8200")
+        self.assertEqual(cfg["token"], "custom-token")

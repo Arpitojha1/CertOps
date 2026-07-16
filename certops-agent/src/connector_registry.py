@@ -117,3 +117,66 @@ def resolve_host_connector(row: dict[str, Any]) -> Any:
         return c
 
     raise RuntimeError(f"Unknown host connector type: '{cname}' (category='{cat}')")
+
+
+def probe_env_vars() -> list[dict]:
+    """
+    Checks environment variables and returns a list of connector configs to seed.
+    One entry per detected backend. Incomplete configs are still returned
+    (the connector class will raise at instantiation time if required fields are missing).
+    """
+    configs = []
+
+    vault_addr = os.getenv("VAULT_ADDR")
+    if vault_addr:
+        configs.append({
+            "name": "hashicorp",
+            "category": "hashicorp",
+            "config": {
+                "url": vault_addr,
+                "token": os.getenv("VAULT_TOKEN"),
+            },
+        })
+
+    azure_url = os.getenv("AZURE_KEYVAULT_URL")
+    if azure_url:
+        configs.append({
+            "name": "azure",
+            "category": "azure",
+            "config": {
+                "keyvault_url": azure_url,
+                "tenant_id": os.getenv("AZURE_TENANT_ID"),
+                "client_id": os.getenv("AZURE_CLIENT_ID"),
+                "client_secret": os.getenv("AZURE_CLIENT_SECRET"),
+            },
+        })
+
+    return configs
+
+
+def seed_connectors_from_env(db_path: str | None = None) -> list[str]:
+    """
+    Probes env vars and creates DB connector rows for detected backends.
+    Skips backends that already have a connector with the same name (idempotent).
+    Returns list of newly seeded connector names.
+    """
+    from src import db
+
+    configs = probe_env_vars()
+    seeded = []
+    for cfg in configs:
+        existing = db.get_connector_by_name(cfg["name"], db_path=db_path)
+        if existing:
+            logger.info("Connector '%s' already exists in DB, skipping seed", cfg["name"])
+            continue
+        db.create_connector(
+            name=cfg["name"],
+            category=cfg["category"],
+            renewal_threshold_days=float(os.getenv("RENEWAL_THRESHOLD_DAYS", "2")),
+            config=json.dumps(cfg["config"]),
+            is_active=True,
+            db_path=db_path,
+        )
+        logger.info("Seeded connector '%s' from environment variables", cfg["name"])
+        seeded.append(cfg["name"])
+    return seeded
