@@ -31,6 +31,11 @@ else:
     from . import db
 
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-before-any-external-access")
+if JWT_SECRET == "change-me-before-any-external-access":
+    raise RuntimeError(
+        "JWT_SECRET is set to the insecure default placeholder. "
+        "Set a real secret in .env or environment. See .env.example for instructions."
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
 COOKIE_NAME = "certops_token"
@@ -126,14 +131,15 @@ def logout(response: Response):
 
 
 @router.post("/auth/signup")
-def signup(body: SignupRequest, _: dict = Depends(require_admin)):
+def signup(body: SignupRequest, current_user: dict = Depends(require_admin)):
     if db.get_user_by_email(body.email):
         raise HTTPException(status_code=409, detail="User already exists")
     if body.role not in ("admin", "viewer"):
         raise HTTPException(status_code=400, detail="Role must be 'admin' or 'viewer'")
-    uid = db.create_user(body.email, hash_password(body.password), body.role)
+    inviter_tenant = current_user.get("tenant_id", "default")
+    uid = db.create_user(body.email, hash_password(body.password), body.role, tenant_id=inviter_tenant)
     user = db.get_user_by_id(uid)
-    return {"id": user["id"], "email": user["email"], "role": user["role"]}
+    return {"id": user["id"], "email": user["email"], "role": user["role"], "tenant_id": inviter_tenant}
 
 
 class InviteRequest(BaseModel):
@@ -155,7 +161,8 @@ def create_invite(body: InviteRequest, current_user: dict = Depends(require_admi
         raise HTTPException(status_code=409, detail="User already exists")
     token = secrets.token_urlsafe(32)
     expires_utc = datetime.now(timezone.utc) + timedelta(hours=body.expires_in_hours)
-    invite = db.create_invite(token, body.email, body.role, expires_utc)
+    inviter_tenant = current_user.get("tenant_id", "default")
+    invite = db.create_invite(token, body.email, body.role, expires_utc, inviter_tenant_id=inviter_tenant)
     # Log only redacted reference (last 6 chars) — never log full token string
     logger.info("Admin created invite for email='%s', role='%s', token_ref='***%s'", body.email, body.role, token[-6:])
     db.log_activity(
@@ -187,11 +194,12 @@ def register_with_invite(body: RegisterWithInviteRequest, response: Response):
     if db.get_user_by_email(invite["email"]):
         raise HTTPException(status_code=409, detail="User already exists")
 
-    uid = db.create_user(invite["email"], hash_password(body.password), invite["role"])
+    inviter_tenant = invite.get("inviter_tenant_id", "default")
+    uid = db.create_user(invite["email"], hash_password(body.password), invite["role"], tenant_id=inviter_tenant)
     db.mark_invite_used(body.token)
     user = db.get_user_by_id(uid)
 
-    token = _make_token(user["id"], user["email"], user["role"])
+    token = _make_token(user["id"], user["email"], user["role"], tenant_id=inviter_tenant)
     response.set_cookie(COOKIE_NAME, token, **_cookie_kwargs())
     db.log_activity(
         event_type="invite_redeemed",
