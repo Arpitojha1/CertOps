@@ -1,0 +1,21 @@
+=== certops-agent test suite ===
+Platform: win32, Python 3.13.7, pytest 9.1.1
+Collected: 43 items
+
+FAILED  certops-agent/tests/test_tier1_tasks_integration.py::TestTier1TasksIntegration::test_full_tasks_pipeline_closed_loop
+  AssertionError: 'deploy_failed' != 'Deployed pending reload'
+
+42 passed, 1 failed, 0 skipped in 79.46s
+
+=== certops-dashboard test suite ===
+Platform: win32, Python 3.13.7, pytest 9.1.1
+Collected: 33 items
+
+32 passed, 0 failed, 1 skipped in 17.11s
+
+=== FAILURE DETAIL ===
+test_tier1_tasks_integration.py:55: test_full_tasks_pipeline_closed_loop
+  self.assertEqual(res2["stage"], "Deployed pending reload")
+  AssertionError: 'deploy_failed' != 'Deployed pending reload'
+  - deploy_failed
+  + Deployed pending reload
