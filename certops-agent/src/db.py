@@ -42,7 +42,7 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None) -> None:
@@ -258,6 +258,12 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
             _cur = conn.execute(f"PRAGMA table_info({_tbl})")
             if "tenant_id" not in {r[1] for r in _cur.fetchall()}:
                 conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+
+        # Version 3: add inviter_tenant_id to user_invites for auth tenant threading
+        try:
+            conn.execute("ALTER TABLE user_invites ADD COLUMN inviter_tenant_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         cur = conn.execute("SELECT COUNT(*) FROM connectors")
         if cur.fetchone()[0] == 0 and os.getenv("SKIP_DEFAULT_CONNECTORS") != "1":
