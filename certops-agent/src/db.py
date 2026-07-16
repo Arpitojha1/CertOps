@@ -1388,6 +1388,25 @@ def insert_renewal_log(
 
     conn = get_db_connection(db_path)
     try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS renewal_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vault_source TEXT,
+                cert_id TEXT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                connector_category TEXT,
+                connector_type TEXT,
+                old_expiry TEXT,
+                new_expiry TEXT,
+                old_fingerprint TEXT,
+                new_fingerprint TEXT,
+                success BOOLEAN NOT NULL,
+                detail TEXT
+            )
+            """
+        )
         cursor = conn.execute(
             """
             INSERT INTO renewal_log (
