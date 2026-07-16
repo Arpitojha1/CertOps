@@ -42,4 +42,5 @@ trigger.json
 *.debug.md
 
 # Tooling artifacts
-.opencode/
+.opencode/
+SESSION_REVIEW_*.md
