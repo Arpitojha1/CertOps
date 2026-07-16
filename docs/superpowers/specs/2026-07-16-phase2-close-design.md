@@ -1,7 +1,7 @@
 # CertOps — Phase 2-Close Design Specification
 
 **Date:** 2026-07-16  
-**Status:** Approved by Human Partner  
+**Status:** Approved by Human Partner (with refinement revisions)  
 **Topic:** Closing the existing Phase 2 gaps (Read-Side Isolation & Live Two-Tenant Integration)  
 **Governing Rule:** Phase 2-Close must be fully verified and closed before Phase 2.5a (or any subsequent phase) is initiated.
 
@@ -74,49 +74,64 @@ The test executes HTTP `GET` requests via `fastapi.testclient.TestClient` across
 | 10 | `GET /api/notification-log` | Exactly 1 (`notif_log_A`) | Exactly 1 (`notif_log_B`) | Exactly 2 (`notif_log_A`, `notif_log_B`) |
 | 11 | `GET /api/scheduler/status` | Next job evaluates `cert_A` only;<br>Recent logs contain `ren_log_A` only | Next job evaluates `cert_B` only;<br>Recent logs contain `ren_log_B` only | Next job evaluates both;<br>Recent logs contain both |
 
+*Note on Endpoint #11 (`/api/scheduler/status`)*: The assertion that the single `next_job` evaluates exclusively `cert_A` for Viewer A and `cert_B` for Viewer B holds under this exact seeding (one due certificate per tenant). With multiple due certificates, tie-breaking by `next_renewal_at` applies within the tenant scope.
+
+### 3.3 Negative-Path Query Parameter Tampering Assertions
+To verify that `_get_tenant_scope()` strictly overrides any client-supplied parameters and never naively trusts query strings:
+- The test issues `GET /api/certificates?tenant_id=tenant_B` authenticated as `Viewer A` and asserts the response returns only `cert_A` (zero `tenant_B` records).
+- The test issues `GET /api/certificates/due?group_id={group_B_id}` authenticated as `Viewer A` and asserts the response is empty (`[]`) or returns only `cert_A` if scoped, verifying no cross-tenant group filter bleeding occurs.
+
 ---
 
 ## 4. Section 2: Live Two-Tenant Concurrent Celery Subprocess Integration (`test_live_two_tenant_integration.py`)
 
-### 4.1 Live Infrastructure Preconditions
+### 4.1 Live Infrastructure Preconditions & Hard Overall Timeout
 - The test is gated by `@unittest.skipUnless(os.getenv("CERTOPS_RUN_LIVE") == "1", "requires live infra")`.
 - Requires running Docker Compose services: `redis` (port 6379), `vault` (port 8200), `step-ca` (or local ca wrapper), and `nginx` (port 443).
+- **Hard Overall Test Timeout**: To prevent indefinite blocking in CI/dev environments if external services stall, the test enforces a hard 90-second overall timeout (`@pytest.mark.timeout(90)` or explicit `threading.Event.wait(timeout=90)` during pipeline execution).
 
-### 4.2 Multi-Tenant Provisioning & Setup
-In the shared live database (`certops.db`):
-- **Tenant A**:
-  - Scoped agent token: `token_A_live` (`agent_tokens` table, `tenant_id="tenant_A"`).
-  - Secret store connector: `hashicorp_live_A` (`vault_source="hashicorp"`, `tenant_id="tenant_A"`).
-  - Certificate record: `tenant_a_live.crt` (`common_name="localhost"`, `expiry_utc="2024-01-01T00:00:00Z"` so it requires immediate renewal).
-- **Tenant B**:
-  - Scoped agent token: `token_B_live` (`agent_tokens` table, `tenant_id="tenant_B"`).
-  - Secret store connector: `hashicorp_live_B` (`vault_source="hashicorp"`, `tenant_id="tenant_B"`).
-  - Certificate record: `tenant_b_live.crt` (`common_name="localhost"`, `expiry_utc="2024-01-01T00:00:00Z"` so it requires immediate renewal).
+### 4.2 Idempotent Multi-Tenant Provisioning & Setup
+To guarantee no unique constraint collisions across repeated runs or after previous crashes:
+- `setUpClass` (or `setUp`) executes an explicit cleanup of any existing entities matching the run's target names, OR assigns a unique timestamp/UUID suffix (`_live_{run_id}`) to all seeded entities.
+- In the shared live database (`certops.db`):
+  - **Tenant A**:
+    - Scoped agent token: `token_A_live_{run_id}` (`agent_tokens` table, `tenant_id="tenant_A"`).
+    - Secret store connector: `hashicorp_live_A_{run_id}` (`vault_source="hashicorp"`, `tenant_id="tenant_A"`).
+    - Certificate record: `tenant_a_live_{run_id}.crt` (`common_name="localhost"`, `expiry_utc="2024-01-01T00:00:00Z"` so it requires immediate renewal).
+  - **Tenant B**:
+    - Scoped agent token: `token_B_live_{run_id}` (`agent_tokens` table, `tenant_id="tenant_B"`).
+    - Secret store connector: `hashicorp_live_B_{run_id}` (`vault_source="hashicorp"`, `tenant_id="tenant_B"`).
+    - Certificate record: `tenant_b_live_{run_id}.crt` (`common_name="localhost"`, `expiry_utc="2024-01-01T00:00:00Z"` so it requires immediate renewal).
 
-### 4.3 Concurrent Physical Subprocess Orchestration
+### 4.3 Concurrent Physical Subprocess Orchestration & Readiness Timeout
 To simulate two independent agent instances operating simultaneously without thread interference:
-- **Worker Subprocess A**: Launched via `subprocess.Popen` running `celery -A src.tasks worker -Q tenant_a_live_q --loglevel=info`.
-  - Environment variables: `CERTOPS_TENANT_ID="tenant_A"`, `AGENT_TOKEN="token_A_live"`, `CELERY_BROKER_URL="redis://localhost:6379/0"`.
-- **Worker Subprocess B**: Launched via `subprocess.Popen` running `celery -A src.tasks worker -Q tenant_b_live_q --loglevel=info`.
-  - Environment variables: `CERTOPS_TENANT_ID="tenant_B"`, `AGENT_TOKEN="token_B_live"`, `CELERY_BROKER_URL="redis://localhost:6379/0"`.
+- **Worker Subprocess A**: Launched via `subprocess.Popen` running `celery -A src.tasks worker -Q tenant_a_{run_id}_q --loglevel=info`.
+  - Environment variables: `CERTOPS_TENANT_ID="tenant_A"`, `AGENT_TOKEN="token_A_live_{run_id}"`, `CELERY_BROKER_URL="redis://localhost:6379/0"`.
+- **Worker Subprocess B**: Launched via `subprocess.Popen` running `celery -A src.tasks worker -Q tenant_b_{run_id}_q --loglevel=info`.
+  - Environment variables: `CERTOPS_TENANT_ID="tenant_B"`, `AGENT_TOKEN="token_B_live_{run_id}"`, `CELERY_BROKER_URL="redis://localhost:6379/0"`.
+- **Concrete Readiness Timeout**: The test polls `celery -A src.tasks status` (or inspects worker ping/redis heartbeats) with a **hard 30-second ceiling** (1-second polling intervals). If either worker fails to report ready within 30 seconds, the test aborts immediately with `RuntimeError("Celery workers failed to reach ready status within 30s")`.
 
-### 4.4 Simultaneous Pipeline Dispatch & Verification
-1. Both workers wait until Celery worker readiness (checked via celery status or retry loop).
-2. The test dispatches both pipelines virtually simultaneously using Celery asynchronous task invocation directed to the respective queues:
-   - `tasks.start_pipeline.apply_async(args=["hashicorp", "tenant_a_live.crt"], queue="tenant_a_live_q")`
-   - `tasks.start_pipeline.apply_async(args=["hashicorp", "tenant_b_live.crt"], queue="tenant_b_live_q")`
-3. Both pipelines execute all 3 Celery stages:
-   - **Stage 1 (Renew)**: `step-ca` issues fresh X.509 certs.
-   - **Stage 2 (Deploy)**: Certs written to Vault and local disk.
-   - **Stage 3 (Verify)**: Trigger Nginx reload, verify via live TLS fingerprint handshake against `localhost:443`, push telemetry to `POST /api/telemetry/ingest`.
-4. **Post-Execution Audit**:
-   - Both certificates reach `pipeline_stage == "Reload confirmed"`.
-   - Database inspection verifies that every `renewal_log` and `activity_log` generated by Worker A has `tenant_id == "tenant_A"`, and every log generated by Worker B has `tenant_id == "tenant_B"`.
-   - Direct cross-tenant access attempts (`db.get_certificate(..., tenant_id="tenant_B")` looking up `tenant_a_live.crt`) correctly return `None`.
+### 4.4 True Synchronized Concurrent Dispatch (`threading.Barrier`)
+To capture race conditions and cross-tenant contamination under genuine concurrency rather than sequential dispatch:
+- Two Python worker threads are spawned, one targeting Worker A (`tenant_a_{run_id}_q`) and one targeting Worker B (`tenant_b_{run_id}_q`).
+- Both threads wait on a shared `threading.Barrier(2)`.
+- Upon release from the barrier at the exact millisecond, both threads invoke `tasks.start_pipeline.apply_async(...)` simultaneously.
+- Both pipelines execute all 3 Celery stages:
+  - **Stage 1 (Renew)**: `step-ca` issues fresh X.509 certs.
+  - **Stage 2 (Deploy)**: Certs written to Vault and local disk.
+  - **Stage 3 (Verify)**: Trigger Nginx reload, verify via live TLS fingerprint handshake against `localhost:443`, push telemetry to `POST /api/telemetry/ingest`.
 
-### 4.5 Teardown & Subprocess Safety
-- Subprocess handles (`proc_a`, `proc_b`) are stored in an instance/class list.
-- In `tearDown` / `tearDownClass`, clean termination is enforced (`proc.terminate()` / `proc.kill()`, `proc.wait()`), guaranteeing zero dangling Celery worker processes on Windows.
+### 4.5 Post-Execution Audit & Live-API-Level Isolation Assertions
+After both pipelines complete and reach `pipeline_stage == "Reload confirmed"`:
+1. **Database Audit**: Inspection confirms every `renewal_log` and `activity_log` generated during Worker A's execution has `tenant_id == "tenant_A"`, and Worker B's logs have `tenant_id == "tenant_B"`.
+2. **Live-API-Level Isolation Assertions**: To verify the full live HTTP application stack (not just the database layer) matches Section 3's behavior:
+   - Authenticating against the live dashboard API (`GET /api/certificates/hashicorp/tenant_a_live_{run_id}.crt`) using `Viewer B` credentials (`or token_B_live`) returns **404 Not Found**.
+   - Authenticating against the live dashboard API (`GET /api/certificates/hashicorp/tenant_b_live_{run_id}.crt`) using `Viewer A` credentials (`or token_A_live`) returns **404 Not Found**.
+   - Authenticating with each viewer against `GET /api/certificates` returns strictly their own live-renewed certificate (`cert_A` for A, `cert_B` for B).
+
+### 4.6 Cross-Platform Teardown & Subprocess Safety
+- Subprocess handles (`proc_a`, `proc_b`) are tracked inside `setUpClass`/`setUp`.
+- Whether running on Linux CI containers or on the primary Windows development machine (`c:\Users\Arpit\certOps`), `tearDownClass`/`tearDown` ensures clean process termination (`proc.terminate()`, waiting up to 5s, falling back to `proc.kill()` if unresponsive), preventing orphaned python/celery processes from lingering across platforms.
 
 ---
 
@@ -124,8 +139,8 @@ To simulate two independent agent instances operating simultaneously without thr
 
 1. **Self-Review (Completed Inline)**:
    - Checked for placeholders or TBD items: None.
-   - Checked internal consistency: All 11 read endpoints explicitly enumerated; data seeding guarantees distinct query behavior across viewers.
-   - Checked Windows subprocess teardown: Explicit termination logic specified.
+   - Checked internal consistency: All review feedback items explicitly incorporated.
+   - Checked timing rules: 30s readiness timeout, 90s overall pipeline timeout, `threading.Barrier(2)` concurrent dispatch.
 2. **Commit Design Doc**: Commit this specification file (`docs/superpowers/specs/2026-07-16-phase2-close-design.md`).
-3. **User Approval**: Await human partner review.
+3. **User Approval**: Await final human partner confirmation.
 4. **Implementation Plan**: Once approved, invoke `superpowers:writing-plans` to generate the implementation plan for Phase 2-Close.
