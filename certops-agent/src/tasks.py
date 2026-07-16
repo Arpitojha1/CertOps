@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from celery import Celery, chain
@@ -125,6 +126,14 @@ def task_deploy_certificate(*args, **kwargs) -> dict:
     logger.info("Running Stage 2 (Deploy): cert='%s' connector='%s'", cert_id, connector_name)
     from src import deployer
     res = deployer.run_deploy_pipeline(cert_id, connector_name, db_path=db_path)
+
+    # Test-only delay: parks the pipeline at "Deployed pending reload" for kill/resume proof
+    if os.getenv("CERTOPS_RUN_LIVE") and res.get("success"):
+        delay = float(os.getenv("CERTOPS_TEST_STAGE_DELAY_SECONDS", "0"))
+        if delay > 0:
+            logger.info("[TEST STAGE DELAY] Parking at 'Deployed pending reload' for %.1f seconds", delay)
+            time.sleep(delay)
+
     return {
         "vault_source": connector_name,
         "cert_id": cert_id,
@@ -192,11 +201,11 @@ def resume_pipeline_from_db(vault_source: str, cert_id: str, db_path: str | None
     stage = rec.get("pipeline_stage")
     logger.info("Resuming pipeline for cert='%s' from DB stage='%s'", cert_id, stage)
 
-    if stage == "Renewed":
+    if stage in ("Renewed", "Issued pending deploy"):
         payload = {"vault_source": vault_source, "cert_id": cert_id, "stage": stage, "db_path": db_path}
         workflow = chain(task_deploy_certificate.s(payload), task_verify_reload.s())
         return workflow.apply_async()
-    elif stage in ("Deployed pending reload", "Deployed, pending reload"):
+    elif stage in ("Deployed pending reload", "Deployed, pending reload", "deployed"):
         # Stage 1 and 2 already completed in DB. Resume directly with Stage 3
         payload = {
             "vault_source": vault_source,
@@ -205,8 +214,8 @@ def resume_pipeline_from_db(vault_source: str, cert_id: str, db_path: str | None
             "db_path": db_path,
         }
         return task_verify_reload.delay(payload)
-    elif stage == "Reload confirmed":
-        logger.info("Pipeline already complete ('Reload confirmed') for cert='%s'.", cert_id)
+    elif stage in ("Reload confirmed", "verified"):
+        logger.info("Pipeline already complete ('%s') for cert='%s'.", stage, cert_id)
         return None
     else:
         # Start full pipeline if no known stage
@@ -216,13 +225,13 @@ def resume_pipeline_from_db(vault_source: str, cert_id: str, db_path: str | None
 def resume_all_pending_pipelines(db_path: str | None = None) -> list[tuple[str, str, str]]:
     """
     Queries certops.db for all certificates currently stuck in an in-flight pipeline stage
-    ('Renewed', 'Deployed pending reload', 'Deployed, pending reload') and auto-resumes them.
+    ('Renewed', 'Issued pending deploy', 'Deployed pending reload', 'Deployed, pending reload', 'deployed') and auto-resumes them.
     Returns a list of (vault_source, cert_id, stage) tuples resumed.
     """
     conn = db.get_db_connection(db_path)
     try:
         rows = conn.execute(
-            "SELECT vault_source, name, pipeline_stage FROM certificates WHERE pipeline_stage IN ('Renewed', 'Deployed pending reload', 'Deployed, pending reload')"
+            "SELECT vault_source, name, pipeline_stage FROM certificates WHERE pipeline_stage IN ('Renewed', 'Issued pending deploy', 'Deployed pending reload', 'Deployed, pending reload', 'deployed')"
         ).fetchall()
     finally:
         conn.close()

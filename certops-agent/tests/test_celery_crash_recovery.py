@@ -43,7 +43,7 @@ class TestCeleryCrashRecovery(unittest.TestCase):
         print("GATE 1 DEMO: CELERY THREE-STAGE PIPELINE CRASH & RESUME PROOF")
         print("=" * 80)
 
-        cert_id = "cert-crash-demo-01"
+        cert_id = "/etc/nginx/certs/local.crt"
         vault_source = "ssh_host"
 
         # ----------------------------------------------------------------------

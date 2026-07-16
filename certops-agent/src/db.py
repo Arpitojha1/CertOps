@@ -254,7 +254,7 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
         )
 
         # Idempotent tenant_id migrations for tables added without it
-        for _tbl in ("groups", "maintenance_windows", "notification_policies", "notification_log", "activity_log", "renewal_log"):
+        for _tbl in ("groups", "maintenance_windows", "notification_policies", "notification_log", "activity_log", "renewal_log", "agent_tokens"):
             _cur = conn.execute(f"PRAGMA table_info({_tbl})")
             if "tenant_id" not in {r[1] for r in _cur.fetchall()}:
                 conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN tenant_id TEXT DEFAULT 'default'")

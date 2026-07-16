@@ -31,8 +31,8 @@ class TestTier1TasksIntegration(unittest.TestCase):
         db.run_migrations(test_db)
 
         try:
-            cert_id = "local-certs"
-            vault_source = "hashicorp"
+            cert_id = "/etc/nginx/certs/local.crt"
+            vault_source = "ssh_host"
 
             # Stage 1: Renew certificate
             res1 = tasks.task_renew_certificate(vault_source, cert_id, db_path=test_db)

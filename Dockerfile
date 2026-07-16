@@ -7,6 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENV PYTHONPATH=/app/src
+ENV PYTHONPATH=/app/certops-agent/src
 
 CMD ["celery", "-A", "tasks", "worker", "--loglevel=info"]

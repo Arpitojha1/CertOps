@@ -52,6 +52,7 @@ def get_agent_token_signing_key() -> str:
 def create_agent_token(
     scope: str = "telemetry_push",
     connector_context: Optional[str] = None,
+    tenant_id: str = "default",
     db_path: Optional[str] = None,
 ) -> tuple[str, dict]:
     """
@@ -79,10 +80,10 @@ def create_agent_token(
     try:
         cur = conn.execute(
             """
-            INSERT INTO agent_tokens (token_hash, scope, created_at, revoked_at, connector_context)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO agent_tokens (token_hash, scope, created_at, revoked_at, connector_context, tenant_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (token_hash, scope, now_str, None, connector_context),
+            (token_hash, scope, now_str, None, connector_context, tenant_id),
         )
         conn.commit()
         record_id = cur.lastrowid
@@ -96,6 +97,7 @@ def create_agent_token(
         "created_at": now_str,
         "revoked_at": None,
         "connector_context": connector_context,
+        "tenant_id": tenant_id,
     }
     return raw_token, record
 
@@ -166,7 +168,7 @@ def validate_agent_token(
     conn = db.get_db_connection(db_path)
     try:
         cur = conn.execute(
-            "SELECT id, token_hash, scope, created_at, revoked_at, connector_context FROM agent_tokens WHERE token_hash = ?",
+            "SELECT id, token_hash, scope, created_at, revoked_at, connector_context, tenant_id FROM agent_tokens WHERE token_hash = ?",
             (token_hash,),
         )
         row = cur.fetchone()
@@ -186,6 +188,7 @@ def validate_agent_token(
         "created_at": row[3],
         "revoked_at": row[4],
         "connector_context": row[5],
+        "tenant_id": row[6],
     }
     return {"payload": payload, "record": record}
 

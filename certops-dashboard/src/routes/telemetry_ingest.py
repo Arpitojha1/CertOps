@@ -37,9 +37,10 @@ def register_agent_token(token: str, scope: str = "telemetry_push", revoked: boo
 def require_agent_token_or_db(
     authorization: Optional[str] = Header(None, alias="Authorization"),
     x_agent_token: Optional[str] = Header(None, alias="X-Agent-Token")
-) -> str:
+) -> dict:
     """
     Validates agent token against in-memory registry or DB via agent_auth.
+    Returns dict with keys: raw_token, tenant_id, record (DB record or None for in-memory).
     Must be completely separate from dashboard user auth (jwt/cookie).
     """
     raw_token = None
@@ -56,7 +57,7 @@ def require_agent_token_or_db(
     if raw_token in _VALID_TOKENS:
         if _VALID_TOKENS[raw_token] != "telemetry_push":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent token lacks telemetry_push scope")
-        return raw_token
+        return {"raw_token": raw_token, "tenant_id": "default", "record": None}
 
     # Fallback to DB-backed check via agent_auth if not in memory registry
     try:
@@ -74,7 +75,12 @@ def require_agent_token_or_db(
         else:
             from .. import agent_auth
         token_data = agent_auth.validate_agent_token(authorization=authorization, x_agent_token=x_agent_token)
-        return raw_token
+        record = token_data.get("record", {})
+        return {
+            "raw_token": raw_token,
+            "tenant_id": record.get("tenant_id", "default"),
+            "record": record,
+        }
     except Exception as exc:
         if isinstance(exc, (HTTPException, RuntimeError)):
             raise exc
@@ -101,6 +107,7 @@ class TelemetryPayloadModel(BaseModel):
     agent_id: str
     agent_version: str
     timestamp: str
+    tenant_id: str = "default"
     items: list[TelemetryItemModel] = []
 
 
@@ -109,16 +116,26 @@ class TelemetryPayloadModel(BaseModel):
 @router.post("/api/telemetry/push", status_code=status.HTTP_202_ACCEPTED)
 def ingest_telemetry(
     payload: TelemetryPayloadModel,
-    token: str = Depends(require_agent_token_or_db)
+    token_data: dict = Depends(require_agent_token_or_db)
 ) -> dict[str, str]:
     """
     Ingests telemetry batch from agent push client.
     Stores payload along with server arrival timestamp in inspectable sink.
+    Enforces that the agent token's tenant_id matches the payload's tenant_id.
     """
+    token_tenant = token_data.get("tenant_id", "default")
+    payload_tenant = payload.tenant_id
+    if token_tenant != payload_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Tenant mismatch: token belongs to tenant '{token_tenant}', payload targets tenant '{payload_tenant}'"
+        )
+
     entry = {
         "payload": payload.model_dump(),
         "server_received_at": datetime.now(timezone.utc).isoformat(),
-        "agent_token": token
+        "agent_token": token_data["raw_token"],
+        "tenant_id": token_tenant,
     }
     _RECEIVED_PAYLOADS.append(entry)
     return {"status": "accepted"}

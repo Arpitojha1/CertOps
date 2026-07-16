@@ -32,4 +32,14 @@ __pycache__/
 phase0_exit_gate_report_*.md
 *.debug.md
 *.db-shm
-*.db-wal
+*.db-wal
+
+# Debug/verification scratch files
+_*.py
+check_*.py
+cookies.txt
+trigger.json
+*.debug.md
+
+# Tooling artifacts
+.opencode/

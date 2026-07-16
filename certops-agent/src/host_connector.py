@@ -114,12 +114,12 @@ class SSHHostConnector(HostConnector):
     @classmethod
     def from_config(cls, config: dict[str, Any], renewal_threshold_days: float | None = None) -> "SSHHostConnector":
         return cls(
-            hostname=config.get("hostname", "localhost"),
-            port=int(config.get("port", 2222)),
-            username=config.get("username", "root"),
-            password=config.get("password") or None,
-            key_filename=config.get("key_filename") or None,
-            nginx_conf_dir=config.get("nginx_conf_dir", "/etc/nginx/conf.d"),
+            hostname=config.get("hostname") or config.get("host") or os.getenv("SSH_HOST", "localhost"),
+            port=int(config.get("port") or os.getenv("SSH_PORT", "2222")),
+            username=config.get("username") or os.getenv("SSH_USERNAME", "root"),
+            password=config.get("password") or os.getenv("SSH_PASSWORD", "certops"),
+            key_filename=config.get("key_filename") or os.getenv("SSH_KEY_FILE") or None,
+            nginx_conf_dir=config.get("nginx_conf_dir") or os.getenv("SSH_NGINX_CONF_DIR", "/etc/nginx/conf.d"),
             renewal_threshold_days=renewal_threshold_days,
         )
 
@@ -334,6 +334,26 @@ class WinRMHostConnector(HostConnector):
             password=os.getenv("WINRM_PASSWORD", ""),
             auth_type=os.getenv("WINRM_AUTH_TYPE") or os.getenv("WINRM_AUTH", "ntlm"),
             iis_site_name=os.getenv("WINRM_IIS_SITE_NAME", "Default Web Site"),
+            renewal_threshold_days=renewal_threshold_days,
+        )
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any], renewal_threshold_days: float | None = None) -> "WinRMHostConnector":
+        """
+        Constructs WinRMHostConnector from a DB config dict.
+        DB values are authoritative; env vars are fallback per-field only when
+        the DB config key is absent (not when it's None or empty).
+        """
+        if renewal_threshold_days is None:
+            thresh_str = config.get("renewal_threshold_days") or os.getenv("WINRM_RENEWAL_THRESHOLD_DAYS")
+            renewal_threshold_days = float(thresh_str) if thresh_str else None
+        return cls(
+            hostname=config.get("hostname") or config.get("host") or os.getenv("WINRM_HOST", "localhost"),
+            port=int(config.get("port") or os.getenv("WINRM_PORT", "5985")),
+            username=config.get("username") or os.getenv("WINRM_USERNAME", "Administrator"),
+            password=config.get("password") or os.getenv("WINRM_PASSWORD", ""),
+            auth_type=config.get("auth_type") or config.get("auth") or os.getenv("WINRM_AUTH_TYPE") or os.getenv("WINRM_AUTH", "ntlm"),
+            iis_site_name=config.get("iis_site_name") or os.getenv("WINRM_IIS_SITE_NAME", "Default Web Site"),
             renewal_threshold_days=renewal_threshold_days,
         )
 

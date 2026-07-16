@@ -69,7 +69,7 @@ class TestVerifyFingerprintRigor(unittest.TestCase):
             result = run_verify_pipeline("cert-match", "ssh_test", db_path=self.db_path)
 
         rec = db.get_certificate("ssh_test", "cert-match", db_path=self.db_path)
-        self.assertEqual(rec["pipeline_stage"], "verified")
+        self.assertEqual(rec["pipeline_stage"], "Reload confirmed")
         self.assertTrue(result["success"])
 
         logs = db.get_activity_logs(limit=20, db_path=self.db_path)["items"]

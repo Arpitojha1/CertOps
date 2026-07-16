@@ -111,34 +111,22 @@ def get_active_connectors(db_path: str | None = None) -> list[Any]:
             cat = (row.get("category") or "").lower()
             thresh = row.get("renewal_threshold_days")
             try:
-                if cat in ("secret_store", "hashicorp", "vault") or "hashicorp" in cname.lower() or "vault" in cname.lower():
-                    vault_addr = cfg.get("url") or cfg.get("vault_addr") or cfg.get("VAULT_ADDR") or "http://localhost:8200"
-                    vault_token = cfg.get("token") or cfg.get("vault_token") or cfg.get("VAULT_TOKEN") or ""
+                if cat == "azure" or "azure" in cname.lower() or cfg.get("provider", "").lower() == "azure" or cfg.get("type", "").lower() == "azure":
+                    c = azurekeyvault.AzureKeyVaultClient.from_config(cfg, renewal_threshold_days=thresh)
+                    c.name = cname
+                    connectors.append(c)
+                elif cat in ("secret_store", "hashicorp", "vault") or "hashicorp" in cname.lower() or "vault" in cname.lower():
+                    vault_addr = cfg.get("url") or cfg.get("vault_addr") or cfg.get("VAULT_ADDR") or os.getenv("VAULT_ADDR")
+                    vault_token = cfg.get("token") or cfg.get("vault_token") or cfg.get("VAULT_TOKEN") or os.getenv("VAULT_TOKEN")
                     c = vault_client.HashiCorpVaultClient(vault_addr=vault_addr, vault_token=vault_token, renewal_threshold_days=thresh)
                     c.name = cname
                     connectors.append(c)
-                elif cat == "azure" or "azure" in cname.lower():
-                    c = azurekeyvault.AzureKeyVaultClient.from_env(renewal_threshold_days=thresh)
-                    c.name = cname
-                    connectors.append(c)
                 elif cat in ("host", "ssh_host", "ssh") or "ssh" in cname.lower():
-                    host = cfg.get("hostname") or cfg.get("host", "localhost")
-                    port = int(cfg.get("port", 22))
-                    username = cfg.get("username", "root")
-                    password = cfg.get("password")
-                    key_filename = cfg.get("key_filename")
-                    c = host_connector.SSHHostConnector(
-                        hostname=host,
-                        port=port,
-                        username=username,
-                        password=password,
-                        key_filename=key_filename,
-                        renewal_threshold_days=thresh,
-                    )
+                    c = host_connector.SSHHostConnector.from_config(cfg, renewal_threshold_days=thresh)
                     c.name = cname
                     connectors.append(c)
                 elif cat in ("winrm_host", "winrm") or "winrm" in cname.lower():
-                    c = host_connector.WinRMHostConnector.from_env(renewal_threshold_days=thresh)
+                    c = host_connector.WinRMHostConnector.from_config(cfg, renewal_threshold_days=thresh)
                     c.name = cname
                     connectors.append(c)
                 else:
@@ -174,12 +162,18 @@ def confirm_and_reload_host(
         verify_port = int(os.getenv("VERIFY_PORT", "443"))
 
     connector: host_connector.HostConnector
-    if connector_name == "ssh_host":
-        connector = host_connector.SSHHostConnector.from_env()
-    elif connector_name == "winrm_host":
-        connector = host_connector.WinRMHostConnector.from_env()
+    db_row = db.get_connector_by_name(connector_name)
+    if not db_row:
+        raise RuntimeError(f"Connector '{connector_name}' not found in DB.")
+    cfg = db.decrypt_config(db_row.get("config", "{}")) or {}
+    cat = (db_row.get("category") or "").lower()
+    if cat in ("host", "ssh_host", "ssh") or "ssh" in connector_name.lower():
+        connector = host_connector.SSHHostConnector.from_config(cfg)
+    elif cat in ("winrm_host", "winrm") or "winrm" in connector_name.lower():
+        connector = host_connector.WinRMHostConnector.from_config(cfg)
     else:
-        raise RuntimeError(f"Unknown host connector type: '{connector_name}'")
+        raise RuntimeError(f"Unknown host connector type: '{connector_name}' (category='{cat}')")
+    connector.name = connector_name
 
     db_rec = db.get_certificate(connector_name, cert_id)
     if not db_rec:
@@ -425,7 +419,10 @@ def run_renewal_loop(db_path: str | None = None) -> RenewalSummary:
                         db_path=db_path,
                     )
 
-        else:
+        elif getattr(connector, "category", "") == "ca" or "ca" in c_name.lower():
+            # Certificate Authorities are used during issuance, not secret discovery
+            continue
+        elif hasattr(connector, "list_certificates"):
             # SecretStoreConnector (HashiCorp / Azure)
             try:
                 print(f"\n[VAULT: {c_name}] Discovering certificates...")

@@ -140,6 +140,24 @@ class TestAgentAuth(unittest.TestCase):
         )
         self.assertEqual(resp2.status_code, 401, f"Expected 401 after revocation, got {resp2.status_code}: {resp2.text}")
 
+    def test_06_agent_token_includes_tenant_id(self):
+        """Test 6: Agent token carries tenant_id and it is returned in validation."""
+        from src import agent_auth
+
+        raw_token, token_rec = agent_auth.create_agent_token(
+            scope="telemetry_push",
+            tenant_id="tenant_alpha",
+            db_path=self.db_path
+        )
+        self.assertEqual(token_rec["tenant_id"], "tenant_alpha")
+
+        # Validate and check tenant_id is in the returned record
+        token_data = agent_auth.validate_agent_token(
+            authorization=f"Bearer {raw_token}",
+            db_path=self.db_path
+        )
+        self.assertEqual(token_data["record"]["tenant_id"], "tenant_alpha")
+
     def test_05_token_secret_read_from_agent_token_signing_key_specifically(self):
         """Test 5: Token secret read from AGENT_TOKEN_SIGNING_KEY specifically — test asserts app fails loudly
         if AGENT_TOKEN_SIGNING_KEY is unset. Also assert changing JWT_SECRET alone does not invalidate an agent token and vice versa."""
@@ -191,6 +209,68 @@ class TestAgentAuth(unittest.TestCase):
             json={}
         )
         self.assertEqual(resp_after_key_change.status_code, 401, "Expected 401 after changing AGENT_TOKEN_SIGNING_KEY")
+
+    def test_07_cross_tenant_telemetry_push_rejected(self):
+        """Test 7: Agent token scoped to tenant_alpha is REJECTED when payload targets tenant_beta.
+        This exercises the actual authorization vulnerability: a valid token must not be
+        accepted if the payload targets a different tenant."""
+        from src import agent_auth
+        from src.routes import telemetry_ingest
+
+        # Create a token scoped to tenant_alpha
+        raw_token_alpha, _ = agent_auth.create_agent_token(
+            scope="telemetry_push",
+            tenant_id="tenant_alpha",
+            db_path=self.db_path,
+        )
+
+        payload_alpha = {
+            "agent_id": "test-agent",
+            "agent_version": "1.0",
+            "timestamp": "2026-07-15T00:00:00Z",
+            "tenant_id": "tenant_alpha",
+            "items": [],
+        }
+        payload_beta = {
+            "agent_id": "test-agent",
+            "agent_version": "1.0",
+            "timestamp": "2026-07-15T00:00:00Z",
+            "tenant_id": "tenant_beta",
+            "items": [],
+        }
+
+        telemetry_ingest.clear_received_payloads()
+
+        # 1. tenant_alpha token + tenant_beta payload MUST be rejected (403)
+        resp_cross = self.client.post(
+            "/api/telemetry/push",
+            headers={"Authorization": f"Bearer {raw_token_alpha}"},
+            json=payload_beta,
+        )
+        self.assertEqual(
+            resp_cross.status_code, 403,
+            f"Expected 403 for cross-tenant push, got {resp_cross.status_code}: {resp_cross.text}"
+        )
+        self.assertIn("Tenant mismatch", resp_cross.text)
+
+        # 2. tenant_alpha token + tenant_alpha payload MUST succeed (202)
+        resp_same = self.client.post(
+            "/api/telemetry/push",
+            headers={"Authorization": f"Bearer {raw_token_alpha}"},
+            json=payload_alpha,
+        )
+        self.assertEqual(
+            resp_same.status_code, 202,
+            f"Expected 202 for same-tenant push, got {resp_same.status_code}: {resp_same.text}"
+        )
+
+        # 3. Confirm only the same-tenant payload was stored (cross-tenant was rejected)
+        stored = telemetry_ingest.get_received_payloads()
+        self.assertEqual(len(stored), 1, f"Expected 1 stored payload (cross-tenant rejected), got {len(stored)}")
+        self.assertEqual(stored[0]["payload"]["tenant_id"], "tenant_alpha")
+        self.assertEqual(stored[0]["tenant_id"], "tenant_alpha")
+
+        telemetry_ingest.clear_received_payloads()
 
 
 if __name__ == "__main__":

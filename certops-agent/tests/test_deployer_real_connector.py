@@ -107,8 +107,8 @@ class TestDeployPipelineHostConnector(unittest.TestCase):
 
         # DB stage should also be updated
         rec = db.get_certificate("ssh_host_test", "tls-cert-01", db_path=self.db_path)
-        self.assertEqual(rec["pipeline_stage"], "deployed",
-                         "Pipeline stage must be 'deployed' after successful deploy")
+        self.assertEqual(rec["pipeline_stage"], "Deployed pending reload",
+                         "Pipeline stage must be 'Deployed pending reload' after successful deploy")
         self.assertTrue(result["success"])
 
         print(f"[TEST 1 PASS] deploy_certificate() called once with cert_id='{cert_id_arg}'")
@@ -156,7 +156,7 @@ class TestDeployPipelineSecretStore(unittest.TestCase):
         self.assertIn("FAKE_PEM", call_args[0][1])  # cert_pem
 
         rec = db.get_certificate("hashicorp_test", "tls-cert-01", db_path=self.db_path)
-        self.assertEqual(rec["pipeline_stage"], "deployed")
+        self.assertEqual(rec["pipeline_stage"], "Deployed pending reload")
         self.assertTrue(result["success"])
 
         print(f"[TEST 2 PASS] write_certificate() called once for secret_store connector")
@@ -169,7 +169,7 @@ class TestVerifyPipelineHostConnector(unittest.TestCase):
         self.db_path = _make_temp_db()
         _seed_cert_and_connector(self.db_path, "host", "ssh_host_test")
         # Advance to deployed stage so verify can proceed
-        db.update_pipeline_stage("ssh_host_test", "tls-cert-01", "deployed",
+        db.update_pipeline_stage("ssh_host_test", "tls-cert-01", "Deployed pending reload",
                                  db_path=self.db_path)
 
     def tearDown(self):
@@ -217,7 +217,7 @@ class TestVerifyPipelineHostConnector(unittest.TestCase):
         mock_live_tls.assert_called_once()
 
         rec = db.get_certificate("ssh_host_test", "tls-cert-01", db_path=self.db_path)
-        self.assertEqual(rec["pipeline_stage"], "verified")
+        self.assertEqual(rec["pipeline_stage"], "Reload confirmed")
         self.assertTrue(result["success"])
 
         # activity log entry must record verification method
@@ -239,7 +239,7 @@ class TestVerifyPipelineSecretStore(unittest.TestCase):
     def setUp(self):
         self.db_path = _make_temp_db()
         _seed_cert_and_connector(self.db_path, "secret_store", "hashicorp_test")
-        db.update_pipeline_stage("hashicorp_test", "tls-cert-01", "deployed",
+        db.update_pipeline_stage("hashicorp_test", "tls-cert-01", "Deployed pending reload",
                                  db_path=self.db_path)
 
     def tearDown(self):
@@ -284,7 +284,7 @@ class TestVerifyPipelineSecretStore(unittest.TestCase):
         mock_live_tls.assert_not_called()
 
         rec = db.get_certificate("hashicorp_test", "tls-cert-01", db_path=self.db_path)
-        self.assertEqual(rec["pipeline_stage"], "verified")
+        self.assertEqual(rec["pipeline_stage"], "Reload confirmed")
         self.assertTrue(result["success"])
 
         # activity log must record verification_method=readback

@@ -161,7 +161,7 @@ def run_deploy_pipeline(
             connector.write_certificate(cert_id, pending_cert_pem, pending_cert_key)
             logger.info("SecretStoreConnector.write_certificate() completed for %s/%s", connector_name, cert_id)
 
-        db.update_pipeline_stage(connector_name, cert_id, "deployed", db_path=db_path)
+        db.update_pipeline_stage(connector_name, cert_id, "Deployed pending reload", db_path=db_path)
         db.log_activity(
             event_type="certificate_deployed",
             target=f"{connector_name}/{cert_id}",
@@ -169,14 +169,14 @@ def run_deploy_pipeline(
                 "cert_id": cert_id,
                 "connector": connector_name,
                 "category": category,
-                "status": "deployed",
+                "status": "Deployed pending reload",
             },
             db_path=db_path,
         )
         return {
             "cert_id": cert_id,
             "connector_name": connector_name,
-            "stage": "deployed",
+            "stage": "Deployed pending reload",
             "success": True,
         }
 
@@ -363,7 +363,8 @@ def run_verify_pipeline(
                     f"Read-back fingerprint mismatch: read_back={read_back_fp} expected={expected_fp}"
                 )
 
-        db.update_pipeline_stage(connector_name, cert_id, "verified", db_path=db_path)
+        db.update_pipeline_stage(connector_name, cert_id, "Reload confirmed", db_path=db_path)
+        db.clear_pending_cert(connector_name, cert_id, db_path=db_path)
         db.log_activity(
             event_type="certificate_verified",
             target=f"{connector_name}/{cert_id}",
@@ -371,7 +372,7 @@ def run_verify_pipeline(
                 "cert_id": cert_id,
                 "connector": connector_name,
                 "category": category,
-                "status": "verified",
+                "status": "Reload confirmed",
                 "verification_method": verification_method,
                 **extra,
             },
@@ -380,7 +381,7 @@ def run_verify_pipeline(
         return {
             "cert_id": cert_id,
             "connector_name": connector_name,
-            "stage": "verified",
+            "stage": "Reload confirmed",
             "success": True,
             "verification_method": verification_method,
         }

@@ -104,7 +104,7 @@ class TestGate6CeleryPipeline(unittest.TestCase):
 
             cert_after_deploy = db.get_certificate("stub_pipeline_conn", "test-pipeline-cert", db_path=self.db_path)
             print(f"[AFTER DEPLOY] cert='test-pipeline-cert' stage='{cert_after_deploy['pipeline_stage']}'")
-            self.assertEqual(cert_after_deploy["pipeline_stage"], "deployed")
+            self.assertEqual(cert_after_deploy["pipeline_stage"], "Deployed pending reload")
 
             # 4. Call task_verify_reload synchronously
             verify_res = task_verify_reload("test-pipeline-cert", "stub_pipeline_conn", db_path=self.db_path)
@@ -112,7 +112,7 @@ class TestGate6CeleryPipeline(unittest.TestCase):
 
             cert_after_verify = db.get_certificate("stub_pipeline_conn", "test-pipeline-cert", db_path=self.db_path)
             print(f"[AFTER VERIFY] cert='test-pipeline-cert' stage='{cert_after_verify['pipeline_stage']}'")
-            self.assertEqual(cert_after_verify["pipeline_stage"], "verified")
+            self.assertEqual(cert_after_verify["pipeline_stage"], "Reload confirmed")
 
         # 5. Verify matching activity_log entries
         logs = db.get_activity_logs(limit=50, db_path=self.db_path)["items"]

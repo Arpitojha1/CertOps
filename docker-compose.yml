@@ -12,16 +12,28 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   celery_worker:
     build: .
-    command: celery -A tasks worker --loglevel=info
+    working_dir: /app/certops-agent
+    command: celery -A src.tasks worker --loglevel=info
+    env_file:
+      - .env
     environment:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-      PYTHONPATH: /app/src
+      PYTHONPATH: /app/certops-agent:/app/certops-agent/src
+      VAULT_ADDR: http://vault:8200
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
     volumes:
       - ./:/app
 
@@ -34,6 +46,11 @@ services:
       - "8200:8200"
     cap_add:
       - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8200/v1/sys/health?standbyok=true"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   nginx:
     image: nginx:alpine

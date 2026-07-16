@@ -176,7 +176,7 @@ def list_due_certificates(
     return [_serialize_cert(c, group_names, now_utc) for c in due]
 
 
-@app.get("/api/certificates/{vault_source}/{name}")
+@app.get("/api/certificates/{vault_source}/{name:path}")
 def get_certificate(vault_source: str, name: str, current_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     scope = _get_tenant_scope(current_user)
     cert = db.get_certificate(vault_source, name, tenant_id=scope)
@@ -185,6 +185,39 @@ def get_certificate(vault_source: str, name: str, current_user: dict = Depends(g
     now_utc = datetime.now(timezone.utc)
     group_names = {g["id"]: g["name"] for g in db.list_groups()}
     return _serialize_cert(cert, group_names, now_utc)
+
+
+class TriggerRenewalRequest(BaseModel):
+    vault_source: str
+    cert_name: str
+
+
+@app.post("/api/trigger_renewal")
+@app.post("/api/certificates/{vault_source}/{name:path}/renew")
+def trigger_certificate_renewal(
+    vault_source: str | None = None,
+    name: str | None = None,
+    body: TriggerRenewalRequest | None = None,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    from src import tasks
+    vs = vault_source or (body.vault_source if body else None)
+    nm = name or (body.cert_name if body else None)
+    if not vs or not nm:
+        raise HTTPException(status_code=400, detail="vault_source and cert_name required")
+    scope = _get_tenant_scope(current_user)
+    cert = db.get_certificate(vs, nm, tenant_id=scope)
+    if not cert:
+        raise HTTPException(status_code=404, detail=f"Certificate '{nm}' not found for source '{vs}'")
+    db_p = os.getenv("CERTOPS_DB_PATH", os.getenv("DB_PATH", "./certops.db"))
+    res = tasks.start_pipeline(vs, nm, db_path=db_p)
+    return {
+        "status": "triggered",
+        "task_id": getattr(res, "id", str(res)),
+        "cert_id": f"{vs}:{nm}",
+        "pipelineStage": cert.get("pipeline_stage"),
+    }
+
 
 
 # ─── renewal log ──────────────────────────────────────────────────────────────
