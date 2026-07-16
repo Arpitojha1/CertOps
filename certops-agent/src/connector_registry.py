@@ -61,10 +61,10 @@ def resolve_connector(row: dict[str, Any]) -> Any:
     returns an instantiated connector object.
     Falls back to _GenericConnector for unknown types.
     """
-    from src import azurekeyvault, vault_client, host_connector
+    from src import azurekeyvault, vault_client, host_connector, db
 
     cfg_raw = row.get("config", "{}")
-    cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
+    cfg = db.decrypt_config(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
     cname = row["name"]
     cat = (row.get("category") or "").lower()
     thresh = row.get("renewal_threshold_days")
@@ -103,7 +103,8 @@ def resolve_host_connector(row: dict[str, Any]) -> Any:
     cat = (row.get("category") or "").lower()
     cname = row["name"]
     cfg_raw = row.get("config", "{}")
-    cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
+    from src import db
+    cfg = db.decrypt_config(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
 
     if _match_ssh(cat, cname, cfg, None):
         from src import host_connector
