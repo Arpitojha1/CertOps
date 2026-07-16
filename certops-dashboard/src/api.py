@@ -11,7 +11,7 @@ Auth: JWT in httpOnly cookie via auth.py.
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -150,6 +150,21 @@ def _get_tenant_scope(current_user: dict) -> str | None:
     if current_user.get("role") == "admin":
         return None
     return current_user.get("tenant_id", "default")
+
+
+def require_owned_entity(
+    fetch_fn: Callable[..., Any],
+    *args: Any,
+    tenant_id: str | None,
+    entity_label: str = "resource",
+) -> dict:
+    """Verify an entity fetched from DB belongs to the caller's tenant."""
+    entity = fetch_fn(*args)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"{entity_label} not found")
+    if tenant_id is not None and entity.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail=f"Access denied: {entity_label} belongs to a different tenant")
+    return entity
 
 
 # ─── certificates ─────────────────────────────────────────────────────────────
