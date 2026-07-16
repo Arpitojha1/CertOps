@@ -507,7 +507,12 @@ class AssignGroupRequest(BaseModel):
 
 @app.post("/api/certificates/assign-group")
 def assign_certificate_group(body: AssignGroupRequest, current_user: dict = Depends(require_admin)) -> dict[str, str]:
-    db.assign_certificate_group(body.vault_source, body.name, body.group_id)
+    caller_tenant = current_user.get("tenant_id", "default")
+    is_admin = current_user.get("role") == "admin"
+    scope = None if is_admin else caller_tenant
+    require_owned_entity(db.get_certificate, body.vault_source, body.name, tenant_id=scope, entity_label="certificate")
+    require_owned_entity(db.get_group, body.group_id, tenant_id=scope, entity_label="group")
+    db.assign_certificate_group(body.vault_source, body.name, body.group_id, tenant_id=scope)
     actor_id, actor_email = _actor_from_user(current_user)
     db.log_activity(
         event_type="group_assigned",
@@ -547,6 +552,9 @@ def create_maintenance_window(
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     caller_tenant = current_user.get("tenant_id", "default")
+    is_admin = current_user.get("role") == "admin"
+    scope = None if is_admin else caller_tenant
+    require_owned_entity(db.get_group, body.group_id, tenant_id=scope, entity_label="group")
     window_id = db.create_maintenance_window(
         body.group_id, body.start_time, body.end_time, body.recurrence,
         tenant_id=caller_tenant,
@@ -587,6 +595,9 @@ def create_notification_policy(
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     caller_tenant = current_user.get("tenant_id", "default")
+    is_admin = current_user.get("role") == "admin"
+    scope = None if is_admin else caller_tenant
+    require_owned_entity(db.get_group, body.group_id, tenant_id=scope, entity_label="group")
     policy_id = db.create_notification_policy(body.group_id, body.threshold_days, tenant_id=caller_tenant)
     policies = db.list_notification_policies(group_id=body.group_id)
     actor_id, actor_email = _actor_from_user(current_user)
@@ -694,7 +705,11 @@ class ConfirmReloadRequest(BaseModel):
 
 
 @app.post("/api/host/confirm-reload")
-def confirm_reload(body: ConfirmReloadRequest, _: dict = Depends(require_admin)) -> dict[str, Any]:
+def confirm_reload(body: ConfirmReloadRequest, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+    caller_tenant = current_user.get("tenant_id", "default")
+    is_admin = current_user.get("role") == "admin"
+    scope = None if is_admin else caller_tenant
+    require_owned_entity(db.get_connector_by_name, body.connector_name, tenant_id=scope, entity_label="connector")
     try:
         success = main_module.confirm_and_reload_host(body.connector_name, body.cert_id)
     except Exception as exc:
