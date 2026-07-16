@@ -100,45 +100,18 @@ def _deploy_and_verify_nginx(
 def get_active_connectors(db_path: str | None = None) -> list[Any]:
     """
     Returns active connectors strictly from the DB 'connectors' table authoritative source.
-    Retires all environment variable discovery fallback paths.
+    Uses connector_registry.resolve_connector() for type dispatch.
     """
+    from src import connector_registry
     connectors = []
     try:
         db_rows = db.list_connectors(active_only=True, db_path=db_path)
         for row in db_rows:
-            cfg = db.decrypt_config(row.get("config", "{}")) or {}
-            cname = row["name"]
-            cat = (row.get("category") or "").lower()
-            thresh = row.get("renewal_threshold_days")
             try:
-                if cat == "azure" or "azure" in cname.lower() or cfg.get("provider", "").lower() == "azure" or cfg.get("type", "").lower() == "azure":
-                    c = azurekeyvault.AzureKeyVaultClient.from_config(cfg, renewal_threshold_days=thresh)
-                    c.name = cname
-                    connectors.append(c)
-                elif cat in ("secret_store", "hashicorp", "vault") or "hashicorp" in cname.lower() or "vault" in cname.lower():
-                    vault_addr = cfg.get("url") or cfg.get("vault_addr") or cfg.get("VAULT_ADDR") or os.getenv("VAULT_ADDR")
-                    vault_token = cfg.get("token") or cfg.get("vault_token") or cfg.get("VAULT_TOKEN") or os.getenv("VAULT_TOKEN")
-                    c = vault_client.HashiCorpVaultClient(vault_addr=vault_addr, vault_token=vault_token, renewal_threshold_days=thresh)
-                    c.name = cname
-                    connectors.append(c)
-                elif cat in ("host", "ssh_host", "ssh") or "ssh" in cname.lower():
-                    c = host_connector.SSHHostConnector.from_config(cfg, renewal_threshold_days=thresh)
-                    c.name = cname
-                    connectors.append(c)
-                elif cat in ("winrm_host", "winrm") or "winrm" in cname.lower():
-                    c = host_connector.WinRMHostConnector.from_config(cfg, renewal_threshold_days=thresh)
-                    c.name = cname
-                    connectors.append(c)
-                else:
-                    class _GenericConnector:
-                        pass
-                    c = _GenericConnector()
-                    c.name = cname
-                    c.category = cat
-                    c.renewal_threshold_days = thresh
-                    connectors.append(c)
+                c = connector_registry.resolve_connector(row)
+                connectors.append(c)
             except Exception as exc:
-                logger.error("Failed to instantiate DB connector '%s': %s", cname, exc)
+                logger.error("Failed to instantiate DB connector '%s': %s", row["name"], exc)
     except Exception as exc:
         logger.error("Could not query DB connectors table (%s)", exc)
 
@@ -161,18 +134,11 @@ def confirm_and_reload_host(
     if verify_port is None:
         verify_port = int(os.getenv("VERIFY_PORT", "443"))
 
-    connector: host_connector.HostConnector
+    from src import connector_registry
     db_row = db.get_connector_by_name(connector_name)
     if not db_row:
         raise RuntimeError(f"Connector '{connector_name}' not found in DB.")
-    cfg = db.decrypt_config(db_row.get("config", "{}")) or {}
-    cat = (db_row.get("category") or "").lower()
-    if cat in ("host", "ssh_host", "ssh") or "ssh" in connector_name.lower():
-        connector = host_connector.SSHHostConnector.from_config(cfg)
-    elif cat in ("winrm_host", "winrm") or "winrm" in connector_name.lower():
-        connector = host_connector.WinRMHostConnector.from_config(cfg)
-    else:
-        raise RuntimeError(f"Unknown host connector type: '{connector_name}' (category='{cat}')")
+    connector = connector_registry.resolve_host_connector(db_row)
     connector.name = connector_name
 
     db_rec = db.get_certificate(connector_name, cert_id)
