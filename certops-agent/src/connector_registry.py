@@ -93,3 +93,27 @@ def resolve_connector(row: dict[str, Any]) -> Any:
     c.category = cat
     c.renewal_threshold_days = thresh
     return c
+
+
+def resolve_host_connector(row: dict[str, Any]) -> Any:
+    """
+    Resolves a host connector (SSH/WinRM) from a DB row.
+    Raises RuntimeError for non-host connector types.
+    """
+    cat = (row.get("category") or "").lower()
+    cname = row["name"]
+    cfg_raw = row.get("config", "{}")
+    cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) else (cfg_raw or {})
+
+    if _match_ssh(cat, cname, cfg, None):
+        from src import host_connector
+        c = host_connector.SSHHostConnector.from_config(cfg)
+        c.name = cname
+        return c
+    if _match_winrm(cat, cname, cfg, None):
+        from src import host_connector
+        c = host_connector.WinRMHostConnector.from_config(cfg)
+        c.name = cname
+        return c
+
+    raise RuntimeError(f"Unknown host connector type: '{cname}' (category='{cat}')")

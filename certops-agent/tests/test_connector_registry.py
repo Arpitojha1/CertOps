@@ -127,3 +127,25 @@ class TestWinrmMatch(unittest.TestCase):
         row = {"name": "my-winrm-server", "category": "other", "config": "{}", "renewal_threshold_days": 7.0}
         c = connector_registry.resolve_connector(row)
         self.assertEqual(c.name, "my-winrm-server")
+
+
+class TestResolveHostConnector(unittest.TestCase):
+    def test_ssh_host_resolves(self):
+        row = {"name": "web-ssh", "category": "ssh_host", "config": "{}", "renewal_threshold_days": 7.0}
+        c = connector_registry.resolve_host_connector(row)
+        self.assertEqual(c.name, "web-ssh")
+
+    def test_winrm_host_resolves(self):
+        row = {"name": "iis-winrm", "category": "winrm_host", "config": "{}", "renewal_threshold_days": 7.0}
+        c = connector_registry.resolve_host_connector(row)
+        self.assertEqual(c.name, "iis-winrm")
+
+    def test_secret_store_raises(self):
+        row = {"name": "vault-main", "category": "secret_store", "config": "{}", "renewal_threshold_days": 14.0}
+        with self.assertRaises(RuntimeError):
+            connector_registry.resolve_host_connector(row)
+
+    def test_azure_raises(self):
+        row = {"name": "azure-kv", "category": "azure", "config": "{}", "renewal_threshold_days": 30.0}
+        with self.assertRaises(RuntimeError):
+            connector_registry.resolve_host_connector(row)
