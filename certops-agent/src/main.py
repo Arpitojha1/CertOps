@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
 from dotenv import load_dotenv
 
 if __package__ is None or __package__ == "":
@@ -234,6 +235,54 @@ def run_notification_check(db_path: str | None = None) -> int:
                         f"under policy ID={p['id']} already sent."
                     )
     return sent_count
+
+
+def _setup_register(
+    dashboard_url: str,
+    admin_email: str,
+    admin_password: str,
+    agent_name: str | None,
+    db_path: str | None = None,
+) -> None:
+    """Step 1: Register agent with dashboard, store token in agent.db."""
+    from agent_db import init_agent_db, set_identity, set_status
+
+    init_agent_db(db_path)
+
+    auth_resp = requests.post(
+        f"{dashboard_url.rstrip('/')}/auth/login",
+        json={"email": admin_email, "password": admin_password},
+        timeout=10,
+    )
+    if auth_resp.status_code != 200:
+        print(f"ERROR: Dashboard login failed ({auth_resp.status_code})")
+        raise SystemExit(1)
+
+    admin_token = auth_resp.json().get("access_token") or auth_resp.json().get("token")
+    if not admin_token:
+        print("ERROR: No token in login response")
+        raise SystemExit(1)
+
+    reg_resp = requests.post(
+        f"{dashboard_url.rstrip('/')}/api/agents/register",
+        json={"name": agent_name},
+        headers={"Authorization": f"Bearer {admin_token}"},
+        timeout=10,
+    )
+    if reg_resp.status_code != 200:
+        detail = reg_resp.json().get("detail", "Unknown error")
+        print(f"ERROR: Agent registration failed ({reg_resp.status_code}): {detail}")
+        raise SystemExit(1)
+
+    data = reg_resp.json()
+    set_identity("agent_id", data["agent_id"], db_path)
+    set_identity("tenant_id", data["tenant_id"], db_path)
+    set_identity("token", data["token"], db_path)
+    set_identity("dashboard_url", dashboard_url, db_path)
+    set_status("registered", db_path)
+
+    print(f"  Agent ID: {data['agent_id']}")
+    print(f"  Token stored in agent.db")
 
 
 
