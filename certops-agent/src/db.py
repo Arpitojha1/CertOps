@@ -1341,18 +1341,6 @@ def record_notification_sent(
     now_iso = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection(db_path)
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS notification_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vault_source TEXT,
-                cert_id TEXT,
-                policy_id INTEGER,
-                sent_at TEXT NOT NULL,
-                tenant_id TEXT DEFAULT 'default'
-            )
-            """
-        )
         cursor = conn.execute(
             "INSERT INTO notification_log (vault_source, cert_id, policy_id, sent_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
             (vault_source, cert_id, policy_id, now_iso, tenant_id),
@@ -1374,6 +1362,11 @@ def log_notification_event(
     tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
+    """
+    Log a notification event. Note that parameters event_type, recipient, success, and message
+    are accepted for API/interface uniformity across callers even though notification_log only
+    records (vault_source, cert_id, policy_id, sent_at, tenant_id).
+    """
     return record_notification_sent(
         vault_source=vault_source or (cert_id.split(":", 1)[0] if ":" in cert_id else "hashicorp"),
         cert_id=cert_id,
@@ -1455,26 +1448,6 @@ def insert_renewal_log(
 
     conn = get_db_connection(db_path)
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS renewal_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vault_source TEXT,
-                cert_id TEXT,
-                timestamp TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                connector_category TEXT,
-                connector_type TEXT,
-                old_expiry TEXT,
-                new_expiry TEXT,
-                old_fingerprint TEXT,
-                new_fingerprint TEXT,
-                success BOOLEAN NOT NULL,
-                detail TEXT,
-                tenant_id TEXT DEFAULT 'default'
-            )
-            """
-        )
         cursor = conn.execute(
             """
             INSERT INTO renewal_log (
@@ -1552,19 +1525,6 @@ def register_agent_token(
     now_str = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection(db_path)
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS agent_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token_hash TEXT NOT NULL UNIQUE,
-                scope TEXT NOT NULL DEFAULT 'telemetry_push',
-                created_at TEXT NOT NULL,
-                revoked_at TEXT,
-                connector_context TEXT,
-                tenant_id TEXT DEFAULT 'default'
-            )
-            """
-        )
         cur = conn.execute(
             """
             INSERT INTO agent_tokens (token_hash, scope, created_at, revoked_at, connector_context, tenant_id)
