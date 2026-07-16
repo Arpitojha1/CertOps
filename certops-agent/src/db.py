@@ -42,7 +42,7 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None) -> None:
@@ -262,6 +262,27 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
         # Version 3: add inviter_tenant_id to user_invites for auth tenant threading
         try:
             conn.execute("ALTER TABLE user_invites ADD COLUMN inviter_tenant_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+        # Version 4: agents table + agent_id column on agent_tokens
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agents (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                name TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                registered_at TEXT NOT NULL,
+                configured_at TEXT,
+                activated_at TEXT,
+                last_seen_at TEXT,
+                secret_store_backend TEXT
+            )
+            """
+        )
+        try:
+            conn.execute("ALTER TABLE agent_tokens ADD COLUMN agent_id TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
 
