@@ -11,7 +11,7 @@ from typing import Optional
 import bcrypt
 import jwt as pyjwt
 from dotenv import load_dotenv
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
 from pydantic import BaseModel
 
 load_dotenv()
@@ -91,6 +91,19 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
+
+
+def require_admin_user(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    current_user: Optional[dict] = Cookie(default=None, alias=COOKIE_NAME),
+) -> dict:
+    """Admin auth that accepts both bearer token and cookie."""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[len("Bearer "):]
+        return _decode_token(token)
+    if current_user:
+        return _decode_token(current_user)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
 
 class LoginRequest(BaseModel):
