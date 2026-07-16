@@ -2,7 +2,7 @@
 
 **See `CertOps_Master_Roadmap.md` for *why*. This file is for *how*, and for logging gate evidence.**
 
-This document summarizes the exact state of the CertOps project as of Phase 1 completion. Read this before starting any task to understand what has been built, verified, and decided.
+This document summarizes the exact state of the CertOps project as of Phase 2 completion. Read this before starting any task to understand what has been built, verified, and decided.
 
 ---
 
@@ -834,11 +834,57 @@ RESPONSE: {
 
 ## Phase 2 Outstanding Technical Debt: Tenant Ownership Validation on Mutating Endpoints
 
-> [!WARNING]
-> **Explicit Open Item for Phase 2 Multi-Tenancy Exit Criteria**
-> Read endpoint scoping is complete (all 7 endpoints now filter by `_get_tenant_scope(current_user)`).
-> However, all mutating endpoints (`POST`, `PUT`, `PATCH`, `DELETE`) currently enforce `require_admin` role
-> but do not verify that the target entity belongs to the caller's `tenant_id` or `org_id`.
+> **RESOLVED** — 2026-07-16. See Phase 2 Gate Evidence below.
+
+---
+
+## Phase 2 Gate Evidence: Tenant Ownership Validation (Resolved 2026-07-16)
+
+### Problem
+Read endpoint scoping was complete (all endpoints filter by `_get_tenant_scope(current_user)`), but all mutating endpoints (`POST`, `PUT`, `PATCH`, `DELETE`) enforced `require_admin` role without verifying that the target entity belonged to the caller's `tenant_id`. A tenant-A admin could mutate tenant-B resources.
+
+### Root Cause Found During Implementation
+The super-admin bypass logic (`scope = None if is_admin else caller_tenant`) applied to **all** users with `role="admin"`, not just the global super-admin (`tenant_id="default"`). Since all mutating endpoints require `require_admin`, every tenant admin bypassed the ownership check entirely.
+
+### Fix: `is_super_admin` = `role=="admin" AND tenant_id=="default"`
+Changed ownership bypass to only apply when the caller is the global super-admin (tenant_id="default"). Tenant-scoped admins are properly scoped to their own resources.
+
+### Changes Made
+
+**Agent (`certops-agent/src/db.py`):**
+1. Added `CREATE TABLE IF NOT EXISTS renewal_log` safety net inside `insert_renewal_log()` — fixes 2 previously failing agent tests.
+2. Bumped `CURRENT_SCHEMA_VERSION` from 2 to 3. Version-3 migration creates `renewal_log` for existing DBs and adds `inviter_tenant_id` column to `user_invites`.
+3. Added optional `tenant_id=None` parameter to: `get_group()`, `assign_certificate_group()`, `update_connector()`, `delete_connector()`. Added `inviter_tenant_id=None` to `create_invite()`. All backward-compatible.
+
+**Dashboard (`certops-dashboard/src/api.py`):**
+4. Added `require_owned_entity(fetch_fn, *args, tenant_id, entity_label)` helper that fetches an entity, verifies tenant ownership, and raises 403 on cross-tenant access.
+5. Added tenant ownership checks to 4 endpoints: `assign-group`, `confirm-reload`, `maintenance-windows`, `notification-policies`. Super-admin bypass (`scope=None`) only when `tenant_id=="default"`.
+6. Added tenant ownership checks to `DELETE /api/notification-policies/{id}`.
+
+**Dashboard (`certops-dashboard/src/auth.py`):**
+7. Threaded `tenant_id` through `signup` (inviter's tenant → new user), `create_invite` (inviter's tenant → invite record), and `register-with-invite` (invite's `inviter_tenant_id` → new user + JWT).
+
+**Tests (`certops-dashboard/tests/test_phase2_tenant_ownership.py`):**
+8. 11 test methods covering: cross-tenant rejection (4 endpoints), own-tenant allowed (4 endpoints), global admin bypass (2 endpoints), viewer RBAC block (1 endpoint).
+
+### Gate Evidence
+
+**Agent tests**: 43/43 pass (0 failures, 0 regressions). The 2 previously failing tests (`test_celery_crash_recovery`, `test_host_connector`) now pass thanks to the renewal_log safety net.
+
+**Dashboard tests**: 44/44 pass (1 skip = live integration, by design).
+
+```
+================= 44 passed, 1 skipped, 124 warnings in 16.90s =================
+```
+
+### Commits
+- `9dbe298` — renewal_log safety net
+- `aad89c2` — schema v3 + inviter_tenant_id migration
+- `19a82b8` — DB function tenant parameter updates
+- `57c8939` — require_owned_entity helper
+- `d82930a` — 4 API endpoint tenant checks
+- `75d3051` — auth endpoint tenant threading
+- `ee4fbb3` — is_super_admin fix + 11-tenant ownership tests
 
 ---
 
