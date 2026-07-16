@@ -493,6 +493,7 @@ def create_invite(
     role: str,
     expires_utc: datetime,
     db_path: str | None = None,
+    inviter_tenant_id: str | None = None,
 ) -> dict[str, Any]:
     now_iso = datetime.now(timezone.utc).isoformat()
     expires_iso = expires_utc.isoformat()
@@ -500,10 +501,10 @@ def create_invite(
     try:
         conn.execute(
             """
-            INSERT INTO user_invites (token, email, role, expires_utc, used, created_at)
-            VALUES (?, ?, ?, ?, 0, ?)
+            INSERT INTO user_invites (token, email, role, expires_utc, used, created_at, inviter_tenant_id)
+            VALUES (?, ?, ?, ?, 0, ?, ?)
             """,
-            (token, email, role, expires_iso, now_iso),
+            (token, email, role, expires_iso, now_iso, inviter_tenant_id),
         )
         conn.commit()
     finally:
@@ -515,6 +516,7 @@ def create_invite(
         "expires_utc": expires_iso,
         "used": False,
         "created_at": now_iso,
+        "inviter_tenant_id": inviter_tenant_id,
     }
 
 
@@ -765,9 +767,10 @@ def update_connector(
     name: str | None = None,
     category: str | None = None,
     renewal_threshold_days: float | None = None,
-    config: str | None = None,
+    config: dict | None = None,
     is_active: bool | None = None,
     db_path: str | None = None,
+    tenant_id: str | None = None,
 ) -> bool:
     conn = get_db_connection(db_path)
     try:
@@ -790,18 +793,26 @@ def update_connector(
             params.append(1 if is_active else 0)
         if not fields:
             return False
-        params.append(connector_id)
-        cur = conn.execute(f"UPDATE connectors SET {', '.join(fields)} WHERE id = ?", params)
+        if tenant_id is not None:
+            params.append(connector_id)
+            params.append(tenant_id)
+            cur = conn.execute(f"UPDATE connectors SET {', '.join(fields)} WHERE id = ? AND tenant_id = ?", params)
+        else:
+            params.append(connector_id)
+            cur = conn.execute(f"UPDATE connectors SET {', '.join(fields)} WHERE id = ?", params)
         conn.commit()
         return cur.rowcount > 0
     finally:
         conn.close()
 
 
-def delete_connector(connector_id: int, db_path: str | None = None) -> bool:
+def delete_connector(connector_id: int, db_path: str | None = None, tenant_id: str | None = None) -> bool:
     conn = get_db_connection(db_path)
     try:
-        c_row = conn.execute("SELECT name FROM connectors WHERE id = ?", (connector_id,)).fetchone()
+        if tenant_id is not None:
+            c_row = conn.execute("SELECT name FROM connectors WHERE id = ? AND tenant_id = ?", (connector_id, tenant_id)).fetchone()
+        else:
+            c_row = conn.execute("SELECT name FROM connectors WHERE id = ?", (connector_id,)).fetchone()
         if not c_row:
             return False
         cname = c_row[0]
@@ -1084,13 +1095,19 @@ def create_group(name: str, description: str = "", tenant_id: str = "default", d
         conn.close()
 
 
-def get_group(group_id: int, db_path: str | None = None) -> dict[str, Any] | None:
+def get_group(group_id: int, db_path: str | None = None, tenant_id: str | None = None) -> dict[str, Any] | None:
     conn = get_db_connection(db_path)
     try:
-        cursor = conn.execute(
-            "SELECT id, name, description, tenant_id FROM groups WHERE id = ?",
-            (group_id,),
-        )
+        if tenant_id is not None:
+            cursor = conn.execute(
+                "SELECT id, name, description, tenant_id FROM groups WHERE id = ? AND tenant_id = ?",
+                (group_id, tenant_id),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT id, name, description, tenant_id FROM groups WHERE id = ?",
+                (group_id,),
+            )
         row = cursor.fetchone()
     finally:
         conn.close()
@@ -1120,14 +1137,21 @@ def assign_certificate_group(
     name: str,
     group_id: int | None,
     db_path: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection(db_path)
     try:
-        conn.execute(
-            "UPDATE certificates SET group_id = ?, updated_at = ? WHERE vault_source = ? AND name = ?",
-            (group_id, now_iso, vault_source, name),
-        )
+        if tenant_id is not None:
+            conn.execute(
+                "UPDATE certificates SET group_id = ?, updated_at = ? WHERE vault_source = ? AND name = ? AND tenant_id = ?",
+                (group_id, now_iso, vault_source, name, tenant_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE certificates SET group_id = ?, updated_at = ? WHERE vault_source = ? AND name = ?",
+                (group_id, now_iso, vault_source, name),
+            )
         conn.commit()
     finally:
         conn.close()
