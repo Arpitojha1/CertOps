@@ -26,11 +26,19 @@ class TestGate7ConfigDivergence(unittest.TestCase):
         self.temp_db.close()
         os.environ["DB_PATH"] = self.db_path
         os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+        # Set seed-related env vars to empty strings so load_dotenv(override=False)
+        # inside run_renewal_loop won't re-populate them from .env.
+        for var in ("VAULT_ADDR", "VAULT_TOKEN", "AZURE_KEYVAULT_URL",
+                     "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"):
+            os.environ.setdefault(var, "")
         # Ensure fresh tables
         db.run_migrations(self.db_path)
 
     def tearDown(self):
         os.environ.pop("SKIP_DEFAULT_CONNECTORS", None)
+        for var in ("VAULT_ADDR", "VAULT_TOKEN", "AZURE_KEYVAULT_URL",
+                     "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"):
+            os.environ.pop(var, None)
         db.close_db_connection(self.db_path)
         try:
             os.unlink(self.db_path)

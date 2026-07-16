@@ -77,5 +77,100 @@ class TestTier1ConnectorPrecedence(unittest.TestCase):
                 Path(test_db).unlink()
 
 
+class TestEnvVarSeedCreatesDBRow(unittest.TestCase):
+    def test_vault_env_seed_creates_connector_then_db_is_authoritative(self):
+        """
+        Setting VAULT_ADDR + VAULT_TOKEN and running get_active_connectors
+        should auto-create a 'hashicorp' connector in DB on first call,
+        then subsequent calls use the DB-stored config (not env vars).
+        """
+        import json as _json
+        from src import connector_registry
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            test_db = f.name
+
+        orig_db_path = os.environ.get("CERTOPS_DB_PATH")
+        try:
+            os.environ["CERTOPS_DB_PATH"] = test_db
+            os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+            db.run_migrations(test_db)
+
+            self.assertIsNone(db.get_connector_by_name("hashicorp", db_path=test_db))
+
+            os.environ["VAULT_ADDR"] = "http://env-vault:8200"
+            os.environ["VAULT_TOKEN"] = "env-secret-token"
+
+            seeded = connector_registry.seed_connectors_from_env(db_path=test_db)
+            self.assertEqual(seeded, ["hashicorp"])
+
+            row = db.get_connector_by_name("hashicorp", db_path=test_db)
+            self.assertIsNotNone(row)
+            cfg = db.decrypt_config(row["config"])
+            self.assertEqual(cfg["url"], "http://env-vault:8200")
+            self.assertEqual(cfg["token"], "env-secret-token")
+
+            os.environ["VAULT_ADDR"] = "http://changed-vault:8200"
+            os.environ["VAULT_TOKEN"] = "changed-token"
+
+            connectors = main.get_active_connectors(db_path=test_db)
+            self.assertEqual(len(connectors), 1)
+            c = connectors[0]
+            self.assertEqual(c.vault_addr, "http://env-vault:8200")
+            self.assertEqual(c.vault_token, "env-secret-token")
+
+        finally:
+            if orig_db_path is not None:
+                os.environ["CERTOPS_DB_PATH"] = orig_db_path
+            else:
+                os.environ.pop("CERTOPS_DB_PATH", None)
+            os.environ.pop("VAULT_ADDR", None)
+            os.environ.pop("VAULT_TOKEN", None)
+            os.environ.pop("SKIP_DEFAULT_CONNECTORS", None)
+            db.close_db_connection(test_db)
+            try:
+                os.unlink(test_db)
+            except Exception:
+                pass
+
+    def test_azure_env_seed_creates_connector(self):
+        from src import connector_registry
+        from unittest.mock import patch, MagicMock
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            test_db = f.name
+
+        orig_db_path = os.environ.get("CERTOPS_DB_PATH")
+        try:
+            os.environ["CERTOPS_DB_PATH"] = test_db
+            os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+            db.run_migrations(test_db)
+
+            os.environ["AZURE_KEYVAULT_URL"] = "https://env-vault.vault.azure.net"
+            os.environ["AZURE_TENANT_ID"] = "env-tenant"
+            os.environ["AZURE_CLIENT_ID"] = "env-client"
+            os.environ["AZURE_CLIENT_SECRET"] = "env-secret"
+
+            seeded = connector_registry.seed_connectors_from_env(db_path=test_db)
+            self.assertEqual(seeded, ["azure"])
+
+            row = db.get_connector_by_name("azure", db_path=test_db)
+            self.assertIsNotNone(row)
+            self.assertEqual(row["category"], "azure")
+
+        finally:
+            if orig_db_path is not None:
+                os.environ["CERTOPS_DB_PATH"] = orig_db_path
+            else:
+                os.environ.pop("CERTOPS_DB_PATH", None)
+            for var in ["AZURE_KEYVAULT_URL", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "SKIP_DEFAULT_CONNECTORS"]:
+                os.environ.pop(var, None)
+            db.close_db_connection(test_db)
+            try:
+                os.unlink(test_db)
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

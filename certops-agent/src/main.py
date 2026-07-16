@@ -244,6 +244,9 @@ def run_renewal_loop(db_path: str | None = None) -> RenewalSummary:
     """
     load_dotenv()
 
+    from src import connector_registry
+    connector_registry.seed_connectors_from_env(db_path=db_path)
+
     threshold_days = float(os.getenv("RENEWAL_THRESHOLD_DAYS", "2"))
     password_file = os.getenv("STEP_CA_PASSWORD_FILE", "./pass.txt")
     ca_url = os.getenv("STEP_CA_URL", "https://localhost:8443")
