@@ -1353,10 +1353,6 @@ def record_notification_sent(
             )
             """
         )
-        try:
-            conn.execute("ALTER TABLE notification_log ADD COLUMN tenant_id TEXT DEFAULT 'default'")
-        except sqlite3.OperationalError:
-            pass
         cursor = conn.execute(
             "INSERT INTO notification_log (vault_source, cert_id, policy_id, sent_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
             (vault_source, cert_id, policy_id, now_iso, tenant_id),
@@ -1378,20 +1374,13 @@ def log_notification_event(
     tenant_id: str = "default",
     db_path: str | None = None,
 ) -> int:
-    now_iso = datetime.now(timezone.utc).isoformat()
-    if vault_source is None and ":" in cert_id:
-        parts = cert_id.split(":", 1)
-        vault_source = parts[0]
-    conn = get_db_connection(db_path)
-    try:
-        cursor = conn.execute(
-            "INSERT INTO notification_log (vault_source, cert_id, policy_id, sent_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
-            (vault_source, cert_id, policy_id, now_iso, tenant_id),
-        )
-        conn.commit()
-        return cursor.lastrowid
-    finally:
-        conn.close()
+    return record_notification_sent(
+        vault_source=vault_source or (cert_id.split(":", 1)[0] if ":" in cert_id else "hashicorp"),
+        cert_id=cert_id,
+        policy_id=policy_id,
+        tenant_id=tenant_id,
+        db_path=db_path,
+    )
 
 
 def get_notification_logs(
@@ -1486,10 +1475,6 @@ def insert_renewal_log(
             )
             """
         )
-        try:
-            conn.execute("ALTER TABLE renewal_log ADD COLUMN tenant_id TEXT DEFAULT 'default'")
-        except sqlite3.OperationalError:
-            pass
         cursor = conn.execute(
             """
             INSERT INTO renewal_log (
@@ -1580,10 +1565,6 @@ def register_agent_token(
             )
             """
         )
-        try:
-            conn.execute("ALTER TABLE agent_tokens ADD COLUMN tenant_id TEXT DEFAULT 'default'")
-        except sqlite3.OperationalError:
-            pass
         cur = conn.execute(
             """
             INSERT INTO agent_tokens (token_hash, scope, created_at, revoked_at, connector_context, tenant_id)
