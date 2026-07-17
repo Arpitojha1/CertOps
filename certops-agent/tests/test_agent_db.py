@@ -207,7 +207,7 @@ class TestUsageMetricsMigration(unittest.TestCase):
     def test_usage_metrics_indexes_created(self):
         db.run_migrations(self.db_path)
         conn = sqlite3.connect(self.db_path)
-        indexes = {row[1] for row in conn.execute(
+        indexes = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index'"
         ).fetchall()}
         conn.close()

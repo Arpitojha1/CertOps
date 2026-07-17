@@ -42,7 +42,7 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None) -> None:
@@ -285,6 +285,25 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
             conn.execute("ALTER TABLE agent_tokens ADD COLUMN agent_id TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
+
+        # ── Phase 2.5c: usage_metrics table ──
+        if ver < 5:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS usage_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    active_cert_count INTEGER DEFAULT 0,
+                    renewals_succeeded INTEGER DEFAULT 0,
+                    renewals_failed INTEGER DEFAULT 0,
+                    connectors_json TEXT DEFAULT '{}'
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_agent_time ON usage_metrics (agent_id, recorded_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_tenant_time ON usage_metrics (tenant_id, recorded_at)")
+            conn.execute(f"PRAGMA user_version = 5")
+            ver = 5
 
         cur = conn.execute("SELECT COUNT(*) FROM connectors")
         if cur.fetchone()[0] == 0 and os.getenv("SKIP_DEFAULT_CONNECTORS") != "1":
