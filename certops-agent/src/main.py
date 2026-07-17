@@ -16,6 +16,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
+from agent_telemetry import AgentTelemetryClient
 
 if __package__ is None or __package__ == "":
     import azurekeyvault
@@ -307,6 +308,29 @@ def _setup_configure(
     set_status("configured", db_path)
 
 
+def _try_push_telemetry(summary: dict, db_path: str | None = None) -> None:
+    """Push telemetry to dashboard if agent.db is configured."""
+    from agent_db import get_identity
+
+    agent_id = get_identity("agent_id", db_path)
+    token = get_identity("token", db_path)
+    dashboard_url = get_identity("dashboard_url", db_path)
+
+    if not all([agent_id, token, dashboard_url]):
+        return
+
+    try:
+        client = AgentTelemetryClient(
+            agent_id=agent_id,
+            agent_version=os.getenv("CERTOPS_VERSION", "2.5b"),
+            agent_token=token,
+            ingest_url=f"{dashboard_url.rstrip('/')}/api/telemetry/ingest",
+        )
+        status_code, _ = client.push(connectors=[])
+    except Exception:
+        pass
+
+
 def run_renewal_loop(db_path: str | None = None) -> RenewalSummary:
     """
     Runs the multi-vault and multi-host certificate renewal loop.
@@ -566,6 +590,8 @@ def run_renewal_loop(db_path: str | None = None) -> RenewalSummary:
             f"Skipped: {stats['skipped']} | Failed: {stats['failed']}"
         )
     print("=" * 70)
+
+    _try_push_telemetry(summary, db_path)
 
     return summary
 

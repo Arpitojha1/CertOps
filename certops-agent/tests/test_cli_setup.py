@@ -110,5 +110,37 @@ class TestSetupStep2Configure(unittest.TestCase):
         self.assertEqual(get_status(self.db_path), "configured")
 
 
+class TestTelemetryWiring(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        self.tmp.close()
+        os.environ["AGENT_DB_PATH"] = self.db_path
+        from agent_db import init_agent_db, set_identity, set_status
+        init_agent_db(self.db_path)
+        set_identity("agent_id", "test-agent-id", self.db_path)
+        set_identity("token", "test-jwt-token", self.db_path)
+        set_identity("dashboard_url", "https://dashboard.test.com", self.db_path)
+        set_status("active", self.db_path)
+
+    def tearDown(self):
+        os.environ.pop("AGENT_DB_PATH", None)
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_telemetry_push_called_when_agent_db_exists(self):
+        from main import _try_push_telemetry
+        mock_client = MagicMock()
+        mock_client.push.return_value = (202, {"status": "accepted"})
+        with patch("main.AgentTelemetryClient", return_value=mock_client):
+            _try_push_telemetry({"total": 1, "succeeded": 1}, self.db_path)
+        mock_client.push.assert_called_once()
+
+    def test_telemetry_push_skipped_when_no_agent_db(self):
+        from main import _try_push_telemetry
+        _try_push_telemetry({"total": 1, "succeeded": 1}, "./nonexistent.db")
+        # No error, just skipped
+
+
 if __name__ == "__main__":
     unittest.main()
