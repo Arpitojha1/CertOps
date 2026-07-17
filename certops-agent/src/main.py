@@ -308,6 +308,95 @@ def _setup_configure(
     set_status("configured", db_path)
 
 
+def _setup_validate(db_path: str | None = None) -> None:
+    """Step 3: Run first discovery cycle, mark agent as active."""
+    from agent_db import set_status
+
+    summary = run_renewal_loop(db_path=None)
+    total = summary.get("total", 0) if hasattr(summary, "get") else sum(
+        v.get("succeeded", 0) + v.get("skipped", 0) + v.get("failed", 0)
+        for v in summary.values() if isinstance(v, dict)
+    )
+    succeeded = summary.get("succeeded", 0) if hasattr(summary, "get") else sum(
+        v.get("succeeded", 0) for v in summary.values() if isinstance(v, dict)
+    )
+    print(f"  Found {total} certificates, {succeeded} succeeded")
+    set_status("active", db_path)
+
+
+def cmd_setup(args):
+    """Full setup wizard entry point."""
+    from agent_db import init_agent_db, get_status, get_identity
+
+    init_agent_db(args.agent_db)
+    current_status = get_status(args.agent_db)
+
+    if current_status == "active":
+        agent_id = get_identity("agent_id", args.agent_db) or "unknown"
+        print(f"Agent is already set up (ID: {agent_id}).")
+        print("Run `certops agent status` for details.")
+        return
+
+    print("\nCertOps Agent Setup")
+    print("=" * 40)
+
+    # Step 1: Dashboard Registration
+    if current_status == "pending":
+        print("\nStep 1/3: Dashboard Registration")
+        print("-" * 30)
+        dashboard_url = args.dashboard_url or input("Dashboard URL: ").strip()
+        admin_email = args.admin_email or input("Admin email: ").strip()
+        admin_password = args.admin_password or input("Admin password: ").strip()
+        agent_name = args.agent_name or input("Agent name (optional): ").strip() or None
+
+        print("\n  Connecting to dashboard...")
+        _setup_register(dashboard_url, admin_email, admin_password, agent_name, args.agent_db)
+        print("  Registration complete!")
+        current_status = "registered"
+    else:
+        print("\n  Skipping registration (already registered)")
+
+    # Step 2: Secret Store Configuration
+    if current_status == "registered":
+        print("\nStep 2/3: Secret Store Configuration")
+        print("-" * 30)
+        print("  How do you connect to your secret store?")
+        print("    1. Vault (HashiCorp)")
+        print("    2. Azure Key Vault")
+        print("    3. Skip (configure later)")
+        choice = args.backend_choice or input("  Select [1/2/3]: ").strip()
+
+        backend = None
+        credentials = {}
+        if choice == "1":
+            backend = "vault"
+            credentials["vault_addr"] = args.vault_addr or input("  Vault address: ").strip()
+            credentials["vault_token"] = args.vault_token or input("  Vault token: ").strip()
+        elif choice == "2":
+            backend = "azure"
+            credentials["azure_keyvault_url"] = args.azure_url or input("  Azure Key Vault URL: ").strip()
+            credentials["azure_tenant_id"] = args.azure_tenant_id or input("  Azure Tenant ID: ").strip()
+            credentials["azure_client_id"] = args.azure_client_id or input("  Azure Client ID: ").strip()
+            credentials["azure_client_secret"] = args.azure_client_secret or input("  Azure Client Secret: ").strip()
+
+        print("\n  Configuring secret store...")
+        _setup_configure(backend, credentials, args.agent_db)
+        print("  Configuration complete!")
+        current_status = "configured"
+    else:
+        print("\n  Skipping configuration (already configured)")
+
+    # Step 3: Validation
+    if current_status == "configured":
+        print("\nStep 3/3: Validation")
+        print("-" * 30)
+        print("  Running first discovery cycle...")
+        _setup_validate(args.agent_db)
+
+    agent_id = get_identity("agent_id", args.agent_db) or "unknown"
+    print(f"\nSetup complete. Agent ID: {agent_id}")
+
+
 def _try_push_telemetry(summary: dict, db_path: str | None = None) -> None:
     """Push telemetry to dashboard if agent.db is configured."""
     from agent_db import get_identity
@@ -596,15 +685,38 @@ def run_renewal_loop(db_path: str | None = None) -> RenewalSummary:
     return summary
 
 
+parser = argparse.ArgumentParser(description="CertOps Agent")
+subparsers = parser.add_subparsers(dest="command")
+
+# Legacy confirm-reload
+reload_parser = subparsers.add_parser("confirm-reload")
+reload_parser.add_argument("connector_name")
+reload_parser.add_argument("cert_id")
+
+# Setup wizard
+setup_parser = subparsers.add_parser("setup", help="Run agent setup wizard")
+setup_parser.add_argument("--agent-db", default="./agent.db", help="Path to agent.db")
+setup_parser.add_argument("--dashboard-url", default=None)
+setup_parser.add_argument("--admin-email", default=None)
+setup_parser.add_argument("--admin-password", default=None)
+setup_parser.add_argument("--agent-name", default=None)
+setup_parser.add_argument("--backend-choice", default=None, choices=["1", "2", "3"])
+setup_parser.add_argument("--vault-addr", default=None)
+setup_parser.add_argument("--vault-token", default=None)
+setup_parser.add_argument("--azure-url", default=None)
+setup_parser.add_argument("--azure-tenant-id", default=None)
+setup_parser.add_argument("--azure-client-id", default=None)
+setup_parser.add_argument("--azure-client-secret", default=None)
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CertOps Renewal Loop and Host Reload Confirmation")
-    parser.add_argument("--confirm-reload", nargs=2, metavar=("CONNECTOR", "CERT_ID"), help="Explicitly trigger reload and verify live cert")
     args = parser.parse_args()
 
-    if args.confirm_reload:
-        connector_name, cert_id = args.confirm_reload
-        success = confirm_and_reload_host(connector_name, cert_id)
+    if args.command == "confirm-reload":
+        success = confirm_and_reload_host(args.connector_name, args.cert_id)
         sys.exit(0 if success else 1)
-
-    run_renewal_loop()
+    elif args.command == "setup":
+        cmd_setup(args)
+    else:
+        run_renewal_loop()
     sys.exit(0)

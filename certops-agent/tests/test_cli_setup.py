@@ -142,5 +142,170 @@ class TestTelemetryWiring(unittest.TestCase):
         # No error, just skipped
 
 
+class TestSetupStep3Validate(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        self.tmp.close()
+        os.environ["AGENT_DB_PATH"] = self.db_path
+        from agent_db import init_agent_db, set_identity, set_status
+        init_agent_db(self.db_path)
+        set_identity("agent_id", "test-agent-id", self.db_path)
+        set_identity("token", "test-token", self.db_path)
+        set_identity("dashboard_url", "https://dashboard.test.com", self.db_path)
+        set_status("configured", self.db_path)
+
+    def tearDown(self):
+        os.environ.pop("AGENT_DB_PATH", None)
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_validate_sets_active(self):
+        from main import _setup_validate
+        with patch("main.run_renewal_loop") as mock_loop:
+            mock_loop.return_value = {"total": 3, "succeeded": 3}
+            _setup_validate(db_path=self.db_path)
+        from agent_db import get_status
+        self.assertEqual(get_status(self.db_path), "active")
+
+    def test_validate_handles_no_certs(self):
+        from main import _setup_validate
+        with patch("main.run_renewal_loop") as mock_loop:
+            mock_loop.return_value = {"total": 0, "succeeded": 0}
+            _setup_validate(db_path=self.db_path)
+        from agent_db import get_status
+        self.assertEqual(get_status(self.db_path), "active")
+
+
+class TestCmdSetup(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        self.tmp.close()
+        os.environ["AGENT_DB_PATH"] = self.db_path
+        from agent_db import init_agent_db, set_identity, set_status
+        init_agent_db(self.db_path)
+        set_identity("agent_id", "test-agent-id", self.db_path)
+        set_identity("token", "test-token", self.db_path)
+        set_identity("dashboard_url", "https://dashboard.test.com", self.db_path)
+
+    def tearDown(self):
+        os.environ.pop("AGENT_DB_PATH", None)
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def _make_args(self, **overrides):
+        defaults = {
+            "agent_db": self.db_path,
+            "dashboard_url": None,
+            "admin_email": None,
+            "admin_password": None,
+            "agent_name": None,
+            "backend_choice": None,
+            "vault_addr": None,
+            "vault_token": None,
+            "azure_url": None,
+            "azure_tenant_id": None,
+            "azure_client_id": None,
+            "azure_client_secret": None,
+        }
+        defaults.update(overrides)
+        return MagicMock(**defaults)
+
+    def test_already_active_prints_message(self):
+        from agent_db import set_status
+        set_status("active", self.db_path)
+        from main import cmd_setup
+        args = self._make_args()
+        cmd_setup(args)
+        from agent_db import get_status
+        self.assertEqual(get_status(self.db_path), "active")
+
+    def test_pending_runs_register(self):
+        from agent_db import set_status
+        set_status("pending", self.db_path)
+        from main import cmd_setup
+        args = self._make_args(
+            dashboard_url="https://dash.test",
+            admin_email="a@b.com",
+            admin_password="pass",
+            agent_name="my-agent",
+            backend_choice="3",
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "agent_id": "new-id",
+            "tenant_id": "default",
+            "token": "jwt-tok",
+            "status": "pending",
+        }
+        with patch("main.requests.post", return_value=mock_resp):
+            with patch("main._setup_validate"):
+                cmd_setup(args)
+        from agent_db import get_status
+        self.assertIn(get_status(self.db_path), ("configured", "active"))
+
+    def test_configured_runs_validate(self):
+        from agent_db import set_status
+        set_status("configured", self.db_path)
+        from main import cmd_setup
+        args = self._make_args()
+        with patch("main._setup_validate") as mock_validate:
+            cmd_setup(args)
+        mock_validate.assert_called_once_with(self.db_path)
+
+    def test_registered_runs_configure(self):
+        from agent_db import set_status
+        set_status("registered", self.db_path)
+        from main import cmd_setup
+        args = self._make_args(backend_choice="3")
+        with patch("main._setup_configure") as mock_configure:
+            with patch("main._setup_validate"):
+                cmd_setup(args)
+        mock_configure.assert_called_once()
+
+
+class TestArgparseEntry(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        self.tmp.close()
+        os.environ["AGENT_DB_PATH"] = self.db_path
+        from agent_db import init_agent_db
+        init_agent_db(self.db_path)
+
+    def tearDown(self):
+        os.environ.pop("AGENT_DB_PATH", None)
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_confirm_reload_subcommand(self):
+        from main import parser
+        args = parser.parse_args(["confirm-reload", "myconn", "cert1"])
+        self.assertEqual(args.command, "confirm-reload")
+        self.assertEqual(args.connector_name, "myconn")
+        self.assertEqual(args.cert_id, "cert1")
+
+    def test_setup_subcommand_args(self):
+        from main import parser
+        args = parser.parse_args([
+            "setup",
+            "--agent-db", self.db_path,
+            "--dashboard-url", "https://d.test",
+            "--admin-email", "a@b.com",
+            "--admin-password", "pw",
+            "--agent-name", "ag",
+            "--backend-choice", "1",
+            "--vault-addr", "https://v:8200",
+            "--vault-token", "tok",
+        ])
+        self.assertEqual(args.command, "setup")
+        self.assertEqual(args.agent_db, self.db_path)
+        self.assertEqual(args.dashboard_url, "https://d.test")
+        self.assertEqual(args.backend_choice, "1")
+        self.assertEqual(args.vault_addr, "https://v:8200")
+
+
 if __name__ == "__main__":
     unittest.main()
