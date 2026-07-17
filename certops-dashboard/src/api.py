@@ -149,7 +149,7 @@ def health() -> dict[str, str]:
 
 
 def _get_tenant_scope(current_user: dict) -> str | None:
-    if current_user.get("role") == "admin":
+    if current_user.get("role") == "admin" and current_user.get("tenant_id", "default") == "default":
         return None
     return current_user.get("tenant_id", "default")
 
