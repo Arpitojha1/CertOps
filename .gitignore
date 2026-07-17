@@ -12,6 +12,7 @@ session_context.md
 AGENTS.md
 .claude
 docs/*
+opencode.json
 
 # Python
 venv/
@@ -22,3 +23,24 @@ __pycache__/
 .step/
 *.db
 *.log
+.worktrees/
+
+# Debug/verification scratch — not part of the permanent suite
+.superpowers/sdd/verify_*.py
+.superpowers/sdd/*.diff
+.superpowers/sdd/*.md
+phase0_exit_gate_report_*.md
+*.debug.md
+*.db-shm
+*.db-wal
+
+# Debug/verification scratch files
+_*.py
+check_*.py
+cookies.txt
+trigger.json
+*.debug.md
+
+# Tooling artifacts
+.opencode/
+SESSION_REVIEW_*.md
