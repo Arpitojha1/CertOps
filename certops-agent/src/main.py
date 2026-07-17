@@ -285,6 +285,27 @@ def _setup_register(
     print(f"  Token stored in agent.db")
 
 
+def _setup_configure(
+    backend: str | None,
+    credentials: dict[str, str],
+    db_path: str | None = None,
+) -> None:
+    """Step 2: Configure secret store credentials in agent.db."""
+    from agent_db import set_config, set_status
+
+    if backend == "vault":
+        set_config("vault_addr", credentials["vault_addr"], db_path)
+        set_config("vault_token", credentials["vault_token"], db_path)
+    elif backend == "azure":
+        set_config("azure_keyvault_url", credentials["azure_keyvault_url"], db_path)
+        set_config("azure_tenant_id", credentials.get("azure_tenant_id", ""), db_path)
+        set_config("azure_client_id", credentials.get("azure_client_id", ""), db_path)
+        set_config("azure_client_secret", credentials.get("azure_client_secret", ""), db_path)
+
+    if backend:
+        set_config("secret_store_backend", backend, db_path)
+    set_status("configured", db_path)
+
 
 def run_renewal_loop(db_path: str | None = None) -> RenewalSummary:
     """
