@@ -389,11 +389,9 @@ def update_connector(
     current_user: dict = Depends(require_admin),
 ) -> dict[str, Any]:
     caller_tenant = current_user.get("tenant_id", "default")
-    existing = db.get_connector(connector_id, tenant_id=caller_tenant)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    if existing.get("tenant_id", "default") != caller_tenant:
-        raise HTTPException(status_code=403, detail="Access denied: connector belongs to a different tenant")
+    is_super_admin = current_user.get("role") == "admin" and caller_tenant == "default"
+    scope = None if is_super_admin else caller_tenant
+    existing = require_owned_entity(db.get_connector, connector_id, tenant_id=scope, entity_label="connector")
 
     config_str = json.dumps(body.config) if body.config is not None else None
     db.update_connector(
@@ -403,8 +401,9 @@ def update_connector(
         renewal_threshold_days=body.renewal_threshold_days,
         config=config_str,
         is_active=body.is_active,
+        tenant_id=scope,
     )
-    updated = db.get_connector(connector_id)
+    updated = db.get_connector(connector_id, tenant_id=scope)
     actor_id, actor_email = _actor_from_user(current_user)
     details: dict[str, Any] = {"connector_id": connector_id, "name": existing["name"]}
     if body.config is not None:
@@ -427,13 +426,11 @@ def update_connector(
 @app.delete("/api/connectors/{connector_id}")
 def delete_connector(connector_id: int, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
     caller_tenant = current_user.get("tenant_id", "default")
-    existing = db.get_connector(connector_id, tenant_id=caller_tenant)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    if existing.get("tenant_id", "default") != caller_tenant:
-        raise HTTPException(status_code=403, detail="Access denied: connector belongs to a different tenant")
+    is_super_admin = current_user.get("role") == "admin" and caller_tenant == "default"
+    scope = None if is_super_admin else caller_tenant
+    existing = require_owned_entity(db.get_connector, connector_id, tenant_id=scope, entity_label="connector")
     try:
-        db.delete_connector(connector_id)
+        db.delete_connector(connector_id, tenant_id=scope)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     actor_id, actor_email = _actor_from_user(current_user)
@@ -617,6 +614,8 @@ def create_notification_policy(
 @app.delete("/api/notification-policies/{policy_id}")
 def delete_notification_policy(policy_id: int, current_user: dict = Depends(require_admin)) -> dict[str, str]:
     caller_tenant = current_user.get("tenant_id", "default")
+    is_super_admin = current_user.get("role") == "admin" and caller_tenant == "default"
+    scope = None if is_super_admin else caller_tenant
     conn = db.get_db_connection()
     try:
         row = conn.execute(
@@ -624,7 +623,7 @@ def delete_notification_policy(policy_id: int, current_user: dict = Depends(requ
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Notification policy not found")
-        if (row[0] or "default") != caller_tenant:
+        if scope is not None and (row[0] or "default") != scope:
             raise HTTPException(status_code=403, detail="Access denied: policy belongs to a different tenant")
         conn.execute("DELETE FROM notification_policies WHERE id = ?", (policy_id,))
         conn.commit()
@@ -635,11 +634,11 @@ def delete_notification_policy(policy_id: int, current_user: dict = Depends(requ
         event_type="notification_policy_deleted",
         actor_user_id=actor_id,
         actor_email=actor_email,
-        target=f"policy:{policy_id}",
+        target=f"policy_{policy_id}",
         details={"policy_id": policy_id},
         tenant_id=caller_tenant,
     )
-    return {"status": "deleted"}
+    return {"status": "ok"}
 
 
 # ─── notification log ─────────────────────────────────────────────────────────
