@@ -90,8 +90,8 @@ class HashiCorpVaultClient:
             vault_addr = os.getenv("VAULT_ADDR", "http://localhost:8200")
         if vault_token is None:
             vault_token = os.getenv("VAULT_TOKEN")
-            if not vault_token:
-                raise RuntimeError("VAULT_TOKEN not set for HashiCorpVaultClient")
+        if not vault_token:
+            raise RuntimeError("VAULT_TOKEN not set for HashiCorpVaultClient")
 
         self.vault_addr = vault_addr.rstrip("/")
         if "vault:" in self.vault_addr:

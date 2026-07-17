@@ -75,6 +75,14 @@ class HostConnector(ABC):
         """Explicit, separate step. Only called after user confirmation. Returns success/failure + service output."""
 
 
+def _resolve_val(config: dict, key: str, alt_key: str | None, env_var: str, default: Any = None) -> Any:
+    if key in config and config[key] is not None:
+        return config[key]
+    if alt_key and alt_key in config and config[alt_key] is not None:
+        return config[alt_key]
+    return os.getenv(env_var, default)
+
+
 class SSHHostConnector(HostConnector):
     name = "ssh_host"
 
@@ -115,13 +123,13 @@ class SSHHostConnector(HostConnector):
     @classmethod
     def from_config(cls, config: dict[str, Any], renewal_threshold_days: float | None = None) -> "SSHHostConnector":
         return cls(
-            hostname=config.get("hostname") or config.get("host") or os.getenv("SSH_HOST", "localhost"),
-            port=int(config.get("port") or os.getenv("SSH_PORT", "2222")),
-            username=config.get("username") or os.getenv("SSH_USERNAME", "root"),
+            hostname=_resolve_val(config, "hostname", "host", "SSH_HOST", "localhost"),
+            port=int(_resolve_val(config, "port", None, "SSH_PORT", 2222)),
+            username=_resolve_val(config, "username", None, "SSH_USERNAME", "root"),
             # ponytail: dev-only default password; prod must set explicit SSH_PASSWORD env var
-            password=config.get("password") or os.getenv("SSH_PASSWORD", "certops"),
-            key_filename=config.get("key_filename") or os.getenv("SSH_KEY_FILE") or None,
-            nginx_conf_dir=config.get("nginx_conf_dir") or os.getenv("SSH_NGINX_CONF_DIR", "/etc/nginx/conf.d"),
+            password=_resolve_val(config, "password", None, "SSH_PASSWORD", "certops"),
+            key_filename=_resolve_val(config, "key_filename", None, "SSH_KEY_FILE", None),
+            nginx_conf_dir=_resolve_val(config, "nginx_conf_dir", None, "SSH_NGINX_CONF_DIR", "/etc/nginx/conf.d"),
             renewal_threshold_days=renewal_threshold_days,
         )
 
@@ -349,16 +357,16 @@ class WinRMHostConnector(HostConnector):
         the DB config key is absent (not when it's None or empty).
         """
         if renewal_threshold_days is None:
-            thresh_str = config.get("renewal_threshold_days") or os.getenv("WINRM_RENEWAL_THRESHOLD_DAYS")
+            thresh_str = _resolve_val(config, "renewal_threshold_days", None, "WINRM_RENEWAL_THRESHOLD_DAYS", None)
             renewal_threshold_days = float(thresh_str) if thresh_str else None
         return cls(
-            hostname=config.get("hostname") or config.get("host") or os.getenv("WINRM_HOST", "localhost"),
-            port=int(config.get("port") or os.getenv("WINRM_PORT", "5985")),
-            username=config.get("username") or os.getenv("WINRM_USERNAME", "Administrator"),
+            hostname=_resolve_val(config, "hostname", "host", "WINRM_HOST", "localhost"),
+            port=int(_resolve_val(config, "port", None, "WINRM_PORT", 5985)),
+            username=_resolve_val(config, "username", None, "WINRM_USERNAME", "Administrator"),
             # ponytail: empty default acceptable, but prod should require explicit WINRM_PASSWORD
-            password=config.get("password") or os.getenv("WINRM_PASSWORD", ""),
-            auth_type=config.get("auth_type") or config.get("auth") or os.getenv("WINRM_AUTH_TYPE") or os.getenv("WINRM_AUTH", "ntlm"),
-            iis_site_name=config.get("iis_site_name") or os.getenv("WINRM_IIS_SITE_NAME", "Default Web Site"),
+            password=_resolve_val(config, "password", None, "WINRM_PASSWORD", ""),
+            auth_type=_resolve_val(config, "auth_type", "auth", "WINRM_AUTH_TYPE", os.getenv("WINRM_AUTH", "ntlm")),
+            iis_site_name=_resolve_val(config, "iis_site_name", None, "WINRM_IIS_SITE_NAME", "Default Web Site"),
             renewal_threshold_days=renewal_threshold_days,
         )
 

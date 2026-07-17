@@ -70,13 +70,19 @@ class AzureKeyVaultClient:
         DB values are authoritative; env vars are fallback per-field only when
         the DB config key is absent (not when it's None or empty).
         """
-        vault_url = config.get("keyvault_url") or config.get("url") or os.getenv("AZURE_KEYVAULT_URL")
+        def _get_field(keys: list[str], env_var: str) -> Any:
+            for k in keys:
+                if k in config and config[k] is not None:
+                    return config[k]
+            return os.getenv(env_var)
+
+        vault_url = _get_field(["keyvault_url", "url"], "AZURE_KEYVAULT_URL")
         if not vault_url:
             raise RuntimeError("Azure Key Vault URL not found in DB config or AZURE_KEYVAULT_URL env var")
 
-        tenant_id = config.get("tenant_id") or os.getenv("AZURE_TENANT_ID")
-        client_id = config.get("client_id") or os.getenv("AZURE_CLIENT_ID")
-        client_secret = config.get("client_secret") or os.getenv("AZURE_CLIENT_SECRET")
+        tenant_id = _get_field(["tenant_id"], "AZURE_TENANT_ID")
+        client_id = _get_field(["client_id"], "AZURE_CLIENT_ID")
+        client_secret = _get_field(["client_secret"], "AZURE_CLIENT_SECRET")
 
         if not all([tenant_id, client_id, client_secret]):
             missing = [k for k, v in {"tenant_id": tenant_id, "client_id": client_id, "client_secret": client_secret}.items() if not v]
@@ -89,7 +95,7 @@ class AzureKeyVaultClient:
         )
 
         if renewal_threshold_days is None:
-            thresh_str = config.get("renewal_threshold_days") or os.getenv("AZURE_RENEWAL_THRESHOLD_DAYS")
+            thresh_str = _get_field(["renewal_threshold_days"], "AZURE_RENEWAL_THRESHOLD_DAYS")
             renewal_threshold_days = float(thresh_str) if thresh_str else None
 
         return cls(vault_url=vault_url, credential=credential, renewal_threshold_days=renewal_threshold_days)

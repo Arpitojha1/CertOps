@@ -74,8 +74,14 @@ def resolve_connector(row: dict[str, Any]) -> Any:
         c.name = cname
         return c
     if _match_hashicorp(cat, cname, cfg, thresh):
-        vault_addr = cfg.get("url") or cfg.get("vault_addr") or cfg.get("VAULT_ADDR") or os.getenv("VAULT_ADDR")
-        vault_token = cfg.get("token") or cfg.get("vault_token") or cfg.get("VAULT_TOKEN") or os.getenv("VAULT_TOKEN")
+        def _get_field(keys: list[str], env_var: str) -> Any:
+            for k in keys:
+                if k in cfg and cfg[k] is not None:
+                    return cfg[k]
+            return os.getenv(env_var)
+
+        vault_addr = _get_field(["url", "vault_addr", "VAULT_ADDR"], "VAULT_ADDR")
+        vault_token = _get_field(["token", "vault_token", "VAULT_TOKEN"], "VAULT_TOKEN")
         c = vault_client.HashiCorpVaultClient(vault_addr=vault_addr, vault_token=vault_token, renewal_threshold_days=thresh)
         c.name = cname
         return c
