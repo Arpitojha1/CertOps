@@ -223,5 +223,43 @@ class TestUsageMetricsMigration(unittest.TestCase):
         conn.close()
 
 
+class TestTelemetryPayloadExtension(unittest.TestCase):
+    def test_payload_includes_usage_fields(self):
+        from agent_telemetry import AgentTelemetryClient
+        client = AgentTelemetryClient(
+            agent_id="test-agent",
+            agent_version="2.5c",
+            agent_token="test-token",
+            ingest_url="https://test.example.com/api/telemetry/ingest",
+        )
+        payload = client.build_payload(
+            connectors=[],
+            usage_snapshot={
+                "active_cert_count": 12,
+                "renewals_succeeded": 150,
+                "renewals_failed": 3,
+                "connectors": {"vault": 2, "azure_kv": 1},
+                "last_heartbeat": "2026-07-16T14:30:00Z",
+            },
+        )
+        self.assertEqual(payload["active_cert_count"], 12)
+        self.assertEqual(payload["renewals_succeeded"], 150)
+        self.assertEqual(payload["renewals_failed"], 3)
+        self.assertEqual(payload["connectors"], {"vault": 2, "azure_kv": 1})
+        self.assertEqual(payload["last_heartbeat"], "2026-07-16T14:30:00Z")
+
+    def test_payload_backward_compatible(self):
+        from agent_telemetry import AgentTelemetryClient
+        client = AgentTelemetryClient(
+            agent_id="test-agent",
+            agent_version="2.5c",
+            agent_token="test-token",
+            ingest_url="https://test.example.com/api/telemetry/ingest",
+        )
+        payload = client.build_payload(connectors=[])
+        self.assertNotIn("active_cert_count", payload)
+        self.assertNotIn("renewals_succeeded", payload)
+
+
 if __name__ == "__main__":
     unittest.main()

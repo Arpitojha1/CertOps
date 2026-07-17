@@ -20,7 +20,7 @@ class AgentTelemetryClient:
         self.agent_token = agent_token
         self.ingest_url = ingest_url
 
-    def build_payload(self, connectors: list[dict[str, Any]]) -> dict[str, Any]:
+    def build_payload(self, connectors: list[dict[str, Any]], usage_snapshot: Optional[dict] = None) -> dict[str, Any]:
         """
         Builds structured telemetry payload from connector/cert state dicts.
         Enforces strict allow-list filtering — any extra or sensitive field
@@ -40,12 +40,21 @@ class AgentTelemetryClient:
                 "renewal_stage": str(c.get("renewal_stage", "healthy"))
             })
 
-        return {
+        result = {
             "agent_id": str(self.agent_id),
             "agent_version": str(self.agent_version),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "items": items
         }
+
+        if usage_snapshot:
+            result["active_cert_count"] = usage_snapshot.get("active_cert_count", 0)
+            result["renewals_succeeded"] = usage_snapshot.get("renewals_succeeded", 0)
+            result["renewals_failed"] = usage_snapshot.get("renewals_failed", 0)
+            result["connectors"] = usage_snapshot.get("connectors", {})
+            result["last_heartbeat"] = usage_snapshot.get("last_heartbeat")
+
+        return result
 
     def push(self, connectors: list[dict[str, Any]], timeout: int = 10) -> tuple[int, dict[str, Any]]:
         """
