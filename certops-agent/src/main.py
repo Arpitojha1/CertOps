@@ -399,7 +399,7 @@ def cmd_setup(args):
 
 def _try_push_telemetry(summary: dict, db_path: str | None = None) -> None:
     """Push telemetry to dashboard if agent.db is configured."""
-    from agent_db import get_identity
+    from agent_db import get_identity, get_usage_snapshot, update_usage_snapshot
 
     agent_id = get_identity("agent_id", db_path)
     token = get_identity("token", db_path)
@@ -408,14 +408,41 @@ def _try_push_telemetry(summary: dict, db_path: str | None = None) -> None:
     if not all([agent_id, token, dashboard_url]):
         return
 
+    total_ok = sum(v.get("succeeded", 0) for v in summary.values() if isinstance(v, dict))
+    total_fail = sum(v.get("failed", 0) for v in summary.values() if isinstance(v, dict))
+
+    snap = get_usage_snapshot(db_path)
+    new_ok = snap["renewals_succeeded"] + total_ok
+    new_fail = snap["renewals_failed"] + total_fail
+
+    cert_count = sum(
+        v.get("succeeded", 0) + v.get("skipped", 0)
+        for v in summary.values() if isinstance(v, dict)
+    )
+
+    connectors = {}
+    for k in summary.keys():
+        ctype = k.split("_")[0] if "_" in k else k
+        connectors[ctype] = connectors.get(ctype, 0) + 1
+
+    update_usage_snapshot(
+        db_path,
+        cert_count=cert_count,
+        renewals_ok=new_ok,
+        renewals_fail=new_fail,
+        connectors=connectors,
+    )
+
+    usage = get_usage_snapshot(db_path)
+
     try:
         client = AgentTelemetryClient(
             agent_id=agent_id,
-            agent_version=os.getenv("CERTOPS_VERSION", "2.5b"),
+            agent_version=os.getenv("CERTOPS_VERSION", "2.5c"),
             agent_token=token,
             ingest_url=f"{dashboard_url.rstrip('/')}/api/telemetry/ingest",
         )
-        status_code, _ = client.push(connectors=[])
+        status_code, _ = client.push(connectors=[], usage_snapshot=usage)
     except Exception:
         pass
 

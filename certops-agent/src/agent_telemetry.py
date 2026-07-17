@@ -56,13 +56,13 @@ class AgentTelemetryClient:
 
         return result
 
-    def push(self, connectors: list[dict[str, Any]], timeout: int = 10) -> tuple[int, dict[str, Any]]:
+    def push(self, connectors: list[dict[str, Any]], timeout: int = 10, usage_snapshot: Optional[dict] = None) -> tuple[int, dict[str, Any]]:
         """
         Send payload to telemetry ingestion endpoint using agent token in Authorization header.
         """
         if not self.ingest_url:
             raise ValueError("ingest_url must be provided to push telemetry")
-        payload = self.build_payload(connectors)
+        payload = self.build_payload(connectors, usage_snapshot=usage_snapshot)
         headers = {
             "Authorization": f"Bearer {self.agent_token}",
             "Content-Type": "application/json"

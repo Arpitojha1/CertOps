@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root))
@@ -259,6 +260,41 @@ class TestTelemetryPayloadExtension(unittest.TestCase):
         payload = client.build_payload(connectors=[])
         self.assertNotIn("active_cert_count", payload)
         self.assertNotIn("renewals_succeeded", payload)
+
+
+class TestUsageWiring(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.db_path = self.tmp.name
+        self.tmp.close()
+        from agent_db import init_agent_db, set_identity, set_status
+        init_agent_db(self.db_path)
+        set_identity("agent_id", "test-agent-id", self.db_path)
+        set_identity("token", "test-jwt-token", self.db_path)
+        set_identity("dashboard_url", "https://dashboard.test.com", self.db_path)
+        set_status("active", self.db_path)
+        os.environ["AGENT_DB_PATH"] = self.db_path
+
+    def tearDown(self):
+        os.environ.pop("AGENT_DB_PATH", None)
+        if os.path.exists(self.db_path):
+            os.unlink(self.db_path)
+
+    def test_push_telemetry_includes_usage(self):
+        from main import _try_push_telemetry
+        from agent_db import update_usage_snapshot
+        update_usage_snapshot(
+            self.db_path,
+            cert_count=5,
+            renewals_ok=10,
+            renewals_fail=1,
+            connectors={"vault": 1},
+        )
+        mock_client = MagicMock()
+        mock_client.push.return_value = (202, {"status": "accepted"})
+        with patch("main.AgentTelemetryClient", return_value=mock_client):
+            _try_push_telemetry({"total": 1, "succeeded": 1}, self.db_path)
+        mock_client.push.assert_called_once()
 
 
 if __name__ == "__main__":
