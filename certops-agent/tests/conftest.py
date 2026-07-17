@@ -84,3 +84,16 @@ def _isolate_env_vars_session():
             os.environ.pop(var, None)
         else:
             os.environ[var] = orig
+
+
+@pytest.fixture(autouse=True, scope="function")
+def _isolate_env_vars_function():
+    """Snapshot and restore watched env vars around each test function to prevent intra-session pollution."""
+    snapshot = {var: os.environ.get(var) for var in _WATCHED_VARS}
+    yield
+    for var, orig in snapshot.items():
+        if orig is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = orig
+
