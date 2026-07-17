@@ -60,7 +60,7 @@ class AzureKeyVaultClient:
     def from_env(cls, renewal_threshold_days: float | None = None) -> "AzureKeyVaultClient":
         if renewal_threshold_days is None:
             thresh_str = os.getenv("AZURE_RENEWAL_THRESHOLD_DAYS")
-            renewal_threshold_days = float(thresh_str) if thresh_str else None
+            renewal_threshold_days = float(thresh_str) if thresh_str is not None and thresh_str != "" else None
         return cls(renewal_threshold_days=renewal_threshold_days)
 
     @classmethod
@@ -96,7 +96,7 @@ class AzureKeyVaultClient:
 
         if renewal_threshold_days is None:
             thresh_str = _get_field(["renewal_threshold_days"], "AZURE_RENEWAL_THRESHOLD_DAYS")
-            renewal_threshold_days = float(thresh_str) if thresh_str else None
+            renewal_threshold_days = float(thresh_str) if thresh_str is not None and thresh_str != "" else None
 
         return cls(vault_url=vault_url, credential=credential, renewal_threshold_days=renewal_threshold_days)
 

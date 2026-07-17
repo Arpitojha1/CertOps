@@ -68,6 +68,33 @@ class TestDBAuthoritativeTruthiness(unittest.TestCase):
             connector_registry.resolve_connector(row)
         self.assertIn("VAULT_TOKEN not set", str(ctx.exception))
 
+    def test_azure_from_config_respects_zero_renewal_threshold(self):
+        config = {
+            "keyvault_url": "https://db.vault.azure.net",
+            "tenant_id": "db-tenant",
+            "client_id": "db-client",
+            "client_secret": "db-secret",
+            "renewal_threshold_days": 0,
+        }
+        client = AzureKeyVaultClient.from_config(config)
+        self.assertEqual(client.renewal_threshold_days, 0.0)
+
+        config["renewal_threshold_days"] = "0"
+        client = AzureKeyVaultClient.from_config(config)
+        self.assertEqual(client.renewal_threshold_days, 0.0)
+
+    def test_winrm_from_config_respects_zero_renewal_threshold(self):
+        config = {
+            "hostname": "db-winrm",
+            "renewal_threshold_days": 0,
+        }
+        conn = WinRMHostConnector.from_config(config)
+        self.assertEqual(conn.renewal_threshold_days, 0.0)
+
+        config["renewal_threshold_days"] = "0"
+        conn = WinRMHostConnector.from_config(config)
+        self.assertEqual(conn.renewal_threshold_days, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

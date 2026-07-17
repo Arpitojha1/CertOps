@@ -112,7 +112,7 @@ class HashiCorpVaultClient:
         prefix = os.getenv("VAULT_CERT_PREFIX", "certs/")
         if renewal_threshold_days is None:
             thresh_str = os.getenv("VAULT_RENEWAL_THRESHOLD_DAYS")
-            renewal_threshold_days = float(thresh_str) if thresh_str else None
+            renewal_threshold_days = float(thresh_str) if thresh_str is not None and thresh_str != "" else None
         return cls(prefix=prefix, renewal_threshold_days=renewal_threshold_days)
 
     def _full_api_path(self, name: str, is_metadata: bool = False) -> str:

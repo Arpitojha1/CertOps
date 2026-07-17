@@ -108,7 +108,7 @@ class SSHHostConnector(HostConnector):
     def from_env(cls, renewal_threshold_days: float | None = None) -> "SSHHostConnector":
         if renewal_threshold_days is None:
             thresh_str = os.getenv("SSH_RENEWAL_THRESHOLD_DAYS")
-            renewal_threshold_days = float(thresh_str) if thresh_str else None
+            renewal_threshold_days = float(thresh_str) if thresh_str is not None and thresh_str != "" else None
         return cls(
             hostname=os.getenv("SSH_HOST", "localhost"),
             port=int(os.getenv("SSH_PORT", "2222")),
@@ -337,7 +337,7 @@ class WinRMHostConnector(HostConnector):
     def from_env(cls, renewal_threshold_days: float | None = None) -> "WinRMHostConnector":
         if renewal_threshold_days is None:
             thresh_str = os.getenv("WINRM_RENEWAL_THRESHOLD_DAYS")
-            renewal_threshold_days = float(thresh_str) if thresh_str else None
+            renewal_threshold_days = float(thresh_str) if thresh_str is not None and thresh_str != "" else None
         return cls(
             hostname=os.getenv("WINRM_HOST", "localhost"),
             port=int(os.getenv("WINRM_PORT", "5985")),
@@ -358,7 +358,7 @@ class WinRMHostConnector(HostConnector):
         """
         if renewal_threshold_days is None:
             thresh_str = _resolve_val(config, "renewal_threshold_days", None, "WINRM_RENEWAL_THRESHOLD_DAYS", None)
-            renewal_threshold_days = float(thresh_str) if thresh_str else None
+            renewal_threshold_days = float(thresh_str) if thresh_str is not None and thresh_str != "" else None
         return cls(
             hostname=_resolve_val(config, "hostname", "host", "WINRM_HOST", "localhost"),
             port=int(_resolve_val(config, "port", None, "WINRM_PORT", 5985)),
