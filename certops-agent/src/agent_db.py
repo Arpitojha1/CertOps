@@ -19,20 +19,22 @@ def _db_path(db_path: Optional[str] = None) -> str:
 def init_agent_db(db_path: Optional[str] = None) -> None:
     path = _db_path(db_path)
     conn = sqlite3.connect(path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS agent_identity (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS agent_config (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_identity (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_identity(key: str, db_path: Optional[str] = None) -> Optional[str]:
@@ -40,22 +42,26 @@ def get_identity(key: str, db_path: Optional[str] = None) -> Optional[str]:
     if not os.path.exists(path):
         return None
     conn = sqlite3.connect(path)
-    row = conn.execute(
-        "SELECT value FROM agent_identity WHERE key = ?", (key,)
-    ).fetchone()
-    conn.close()
-    return row[0] if row else None
+    try:
+        row = conn.execute(
+            "SELECT value FROM agent_identity WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
 
 
 def set_identity(key: str, value: str, db_path: Optional[str] = None) -> None:
     path = _db_path(db_path)
     conn = sqlite3.connect(path)
-    conn.execute(
-        "INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
-        (key, value),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_config(key: str, db_path: Optional[str] = None) -> Optional[str]:
@@ -63,10 +69,12 @@ def get_config(key: str, db_path: Optional[str] = None) -> Optional[str]:
     if not os.path.exists(path):
         return None
     conn = sqlite3.connect(path)
-    row = conn.execute(
-        "SELECT value FROM agent_config WHERE key = ?", (key,)
-    ).fetchone()
-    conn.close()
+    try:
+        row = conn.execute(
+            "SELECT value FROM agent_config WHERE key = ?", (key,)
+        ).fetchone()
+    finally:
+        conn.close()
     if row is None:
         return None
     raw = row[0]
@@ -87,12 +95,14 @@ def set_config(key: str, value: str, db_path: Optional[str] = None) -> None:
     else:
         stored = value
     conn = sqlite3.connect(path)
-    conn.execute(
-        "INSERT OR REPLACE INTO agent_config (key, value) VALUES (?, ?)",
-        (key, stored),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_config (key, value) VALUES (?, ?)",
+            (key, stored),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_status(db_path: Optional[str] = None) -> str:
@@ -118,19 +128,20 @@ def get_usage_snapshot(db_path: Optional[str] = None) -> dict:
         return {"active_cert_count": 0, "renewals_succeeded": 0,
                 "renewals_failed": 0, "connectors": {}, "last_heartbeat": None}
     conn = sqlite3.connect(path)
+    try:
+        def _read(key: str, default=None):
+            row = conn.execute(
+                "SELECT value FROM agent_identity WHERE key = ?", (key,)
+            ).fetchone()
+            return row[0] if row else default
 
-    def _read(key: str, default=None):
-        row = conn.execute(
-            "SELECT value FROM agent_identity WHERE key = ?", (key,)
-        ).fetchone()
-        return row[0] if row else default
-
-    cert_count = int(_read("usage:active_cert_count", "0"))
-    ok = int(_read("usage:renewals_succeeded", "0"))
-    fail = int(_read("usage:renewals_failed", "0"))
-    connectors_raw = _read("usage:connectors", "{}")
-    heartbeat = _read("usage:last_heartbeat", None)
-    conn.close()
+        cert_count = int(_read("usage:active_cert_count", "0"))
+        ok = int(_read("usage:renewals_succeeded", "0"))
+        fail = int(_read("usage:renewals_failed", "0"))
+        connectors_raw = _read("usage:connectors", "{}")
+        heartbeat = _read("usage:last_heartbeat", None)
+    finally:
+        conn.close()
 
     try:
         connectors = json.loads(connectors_raw)
@@ -156,16 +167,18 @@ def update_usage_snapshot(
     """Writes usage snapshot to agent.db."""
     path = _db_path(db_path)
     conn = sqlite3.connect(path)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
-                 ("usage:active_cert_count", str(cert_count)))
-    conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
-                 ("usage:renewals_succeeded", str(renewals_ok)))
-    conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
-                 ("usage:renewals_failed", str(renewals_fail)))
-    conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
-                 ("usage:connectors", json.dumps(connectors or {})))
-    conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
-                 ("usage:last_heartbeat", now))
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
+                     ("usage:active_cert_count", str(cert_count)))
+        conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
+                     ("usage:renewals_succeeded", str(renewals_ok)))
+        conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
+                     ("usage:renewals_failed", str(renewals_fail)))
+        conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
+                     ("usage:connectors", json.dumps(connectors or {})))
+        conn.execute("INSERT OR REPLACE INTO agent_identity (key, value) VALUES (?, ?)",
+                     ("usage:last_heartbeat", now))
+        conn.commit()
+    finally:
+        conn.close()
