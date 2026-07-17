@@ -11,27 +11,27 @@ _sibling = _root.parent / "certops-dashboard"
 if _sibling.exists() and str(_sibling) not in sys.path:
     sys.path.insert(0, str(_sibling))
 
-load_dotenv()
-
 def test_key_vault():
-    # 1. Grab the Vault URL from the environment
-    key_vault_url = os.environ.get("AZURE_KEYVAULT_URL")
-    if not key_vault_url:
-        print("Error: AZURE_KEYVAULT_URL environment variable is missing.")
-        return
-
-    print(f"Connecting to: {key_vault_url}")
-
-    # 2. Authenticate using the AZURE_* environment variables
-    # This automatically picks up your Tenant ID, Client ID, and Secret
-    credential = EnvironmentCredential()
-
-    # 3. Create the Certificate Client
-    client = CertificateClient(vault_url=key_vault_url, credential=credential)
-
-    cert_name = "test-cert-01"
-
+    orig_env = os.environ.copy()
     try:
+        load_dotenv()
+        # 1. Grab the Vault URL from the environment
+        key_vault_url = os.environ.get("AZURE_KEYVAULT_URL")
+        if not key_vault_url:
+            print("Error: AZURE_KEYVAULT_URL environment variable is missing.")
+            return
+
+        print(f"Connecting to: {key_vault_url}")
+
+        # 2. Authenticate using the AZURE_* environment variables
+        # This automatically picks up your Tenant ID, Client ID, and Secret
+        credential = EnvironmentCredential()
+
+        # 3. Create the Certificate Client
+        client = CertificateClient(vault_url=key_vault_url, credential=credential)
+
+        cert_name = "test-cert-01"
+
         # 4. Test WRITE privileges (The "Officer" role)
         print(f"\nAttempting to create a self-signed certificate named '{cert_name}'...")
         # Get the default policy for a standard self-signed cert
@@ -52,6 +52,9 @@ def test_key_vault():
     except Exception as e:
         print(f"\n❌ An error occurred: {e}")
         print("If you see 'Authorization failed', remember RBAC takes ~5 mins to propagate!")
+    finally:
+        os.environ.clear()
+        os.environ.update(orig_env)
 
 if __name__ == "__main__":
     test_key_vault()

@@ -72,10 +72,8 @@ LIVE = os.getenv("CERTOPS_RUN_LIVE") == "1"
 class TestMultiCertLoopLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls._orig_env = os.environ.copy()
         load_dotenv()
-        cls._orig_thresh = os.environ.get("RENEWAL_THRESHOLD_DAYS")
-        cls._orig_vault_thresh = os.environ.get("VAULT_RENEWAL_THRESHOLD_DAYS")
-        cls._orig_az_thresh = os.environ.get("AZURE_RENEWAL_THRESHOLD_DAYS")
         os.environ["RENEWAL_THRESHOLD_DAYS"] = "0.8"
         os.environ["VAULT_RENEWAL_THRESHOLD_DAYS"] = "0.8"
         os.environ["AZURE_RENEWAL_THRESHOLD_DAYS"] = "0.8"
@@ -85,18 +83,8 @@ class TestMultiCertLoopLive(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls._orig_thresh is not None:
-            os.environ["RENEWAL_THRESHOLD_DAYS"] = cls._orig_thresh
-        else:
-            os.environ.pop("RENEWAL_THRESHOLD_DAYS", None)
-        if cls._orig_vault_thresh is not None:
-            os.environ["VAULT_RENEWAL_THRESHOLD_DAYS"] = cls._orig_vault_thresh
-        else:
-            os.environ.pop("VAULT_RENEWAL_THRESHOLD_DAYS", None)
-        if cls._orig_az_thresh is not None:
-            os.environ["AZURE_RENEWAL_THRESHOLD_DAYS"] = cls._orig_az_thresh
-        else:
-            os.environ.pop("AZURE_RENEWAL_THRESHOLD_DAYS", None)
+        os.environ.clear()
+        os.environ.update(cls._orig_env)
 
     def test_multi_cert_loop_and_error_isolation(self):
         now_utc = datetime.datetime.now(datetime.timezone.utc)

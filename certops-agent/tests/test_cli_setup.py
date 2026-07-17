@@ -10,14 +10,32 @@ from unittest.mock import patch, MagicMock
 _root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_root))
 sys.path.insert(0, str(_root / "src"))
-
-os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
-os.environ["CERTOPS_CONFIG_ENCRYPTION_KEY"] = "esLNRAOgYV_cuE1EYjj-Rvp_HjKyasnke1M8FvrKopY="
-
 from agent_db import init_agent_db, get_identity, get_status
 
 
-class TestSetupStep1Registration(unittest.TestCase):
+class _BaseSetupTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._orig_skip = os.environ.get("SKIP_DEFAULT_CONNECTORS")
+        cls._orig_key = os.environ.get("CERTOPS_CONFIG_ENCRYPTION_KEY")
+        os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+        os.environ["CERTOPS_CONFIG_ENCRYPTION_KEY"] = "esLNRAOgYV_cuE1EYjj-Rvp_HjKyasnke1M8FvrKopY="
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._orig_skip is None:
+            os.environ.pop("SKIP_DEFAULT_CONNECTORS", None)
+        else:
+            os.environ["SKIP_DEFAULT_CONNECTORS"] = cls._orig_skip
+        if cls._orig_key is None:
+            os.environ.pop("CERTOPS_CONFIG_ENCRYPTION_KEY", None)
+        else:
+            os.environ["CERTOPS_CONFIG_ENCRYPTION_KEY"] = cls._orig_key
+        super().tearDownClass()
+
+
+class TestSetupStep1Registration(_BaseSetupTestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name
@@ -69,7 +87,7 @@ class TestSetupStep1Registration(unittest.TestCase):
         self.assertEqual(get_status(self.db_path), "pending")
 
 
-class TestSetupStep2Configure(unittest.TestCase):
+class TestSetupStep2Configure(_BaseSetupTestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name
@@ -110,7 +128,7 @@ class TestSetupStep2Configure(unittest.TestCase):
         self.assertEqual(get_status(self.db_path), "configured")
 
 
-class TestTelemetryWiring(unittest.TestCase):
+class TestTelemetryWiring(_BaseSetupTestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name
@@ -142,7 +160,7 @@ class TestTelemetryWiring(unittest.TestCase):
         # No error, just skipped
 
 
-class TestSetupStep3Validate(unittest.TestCase):
+class TestSetupStep3Validate(_BaseSetupTestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name
@@ -177,7 +195,7 @@ class TestSetupStep3Validate(unittest.TestCase):
         self.assertEqual(get_status(self.db_path), "active")
 
 
-class TestCmdSetup(unittest.TestCase):
+class TestCmdSetup(_BaseSetupTestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name
@@ -266,7 +284,7 @@ class TestCmdSetup(unittest.TestCase):
         mock_configure.assert_called_once()
 
 
-class TestArgparseEntry(unittest.TestCase):
+class TestArgparseEntry(_BaseSetupTestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name

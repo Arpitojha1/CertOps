@@ -38,6 +38,7 @@ class TestGate6CeleryPipeline(unittest.TestCase):
         celery_app.conf.task_always_eager = True
 
     def tearDown(self):
+        os.environ.pop("DB_PATH", None)
         db.close_db_connection(self.db_path)
         try:
             os.unlink(self.db_path)

@@ -14,16 +14,33 @@ _sibling = _root.parent / "certops-agent"
 if _sibling.exists() and str(_sibling) not in sys.path:
     sys.path.insert(0, str(_sibling))
 
-os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
-os.environ["CERTOPS_CONFIG_ENCRYPTION_KEY"] = "test-key-for-usage=="
-os.environ["AGENT_TOKEN_SIGNING_KEY"] = "test-agent-token-key-for-usage"
-
 from src import api, db
 from fastapi.testclient import TestClient
 from src.routes.telemetry_ingest import register_agent_token, clear_received_payloads
 
 
 class TestUsageIngest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._orig_skip = os.environ.get("SKIP_DEFAULT_CONNECTORS")
+        cls._orig_key = os.environ.get("CERTOPS_CONFIG_ENCRYPTION_KEY")
+        cls._orig_token = os.environ.get("AGENT_TOKEN_SIGNING_KEY")
+        os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+        os.environ["CERTOPS_CONFIG_ENCRYPTION_KEY"] = "test-key-for-usage=="
+        os.environ["AGENT_TOKEN_SIGNING_KEY"] = "test-agent-token-key-for-usage"
+
+    @classmethod
+    def tearDownClass(cls):
+        for var, orig in [("SKIP_DEFAULT_CONNECTORS", cls._orig_skip),
+                          ("CERTOPS_CONFIG_ENCRYPTION_KEY", cls._orig_key),
+                          ("AGENT_TOKEN_SIGNING_KEY", cls._orig_token)]:
+            if orig is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = orig
+        super().tearDownClass()
+
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name
@@ -72,6 +89,26 @@ class TestUsageIngest(unittest.TestCase):
 
 
 class TestUsageAPI(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._orig_skip = os.environ.get("SKIP_DEFAULT_CONNECTORS")
+        cls._orig_key = os.environ.get("CERTOPS_CONFIG_ENCRYPTION_KEY")
+        cls._orig_token = os.environ.get("AGENT_TOKEN_SIGNING_KEY")
+        os.environ["SKIP_DEFAULT_CONNECTORS"] = "1"
+        os.environ["CERTOPS_CONFIG_ENCRYPTION_KEY"] = "test-key-for-usage=="
+        os.environ["AGENT_TOKEN_SIGNING_KEY"] = "test-agent-token-key-for-usage"
+
+    @classmethod
+    def tearDownClass(cls):
+        for var, orig in [("SKIP_DEFAULT_CONNECTORS", cls._orig_skip),
+                          ("CERTOPS_CONFIG_ENCRYPTION_KEY", cls._orig_key),
+                          ("AGENT_TOKEN_SIGNING_KEY", cls._orig_token)]:
+            if orig is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = orig
+        super().tearDownClass()
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.tmp.name

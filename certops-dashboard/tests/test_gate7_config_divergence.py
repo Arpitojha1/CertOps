@@ -35,6 +35,7 @@ class TestGate7ConfigDivergence(unittest.TestCase):
         db.run_migrations(self.db_path)
 
     def tearDown(self):
+        os.environ.pop("DB_PATH", None)
         os.environ.pop("SKIP_DEFAULT_CONNECTORS", None)
         for var in ("VAULT_ADDR", "VAULT_TOKEN", "AZURE_KEYVAULT_URL",
                      "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"):
