@@ -1548,6 +1548,55 @@ def insert_usage_metric(
         conn.close()
 
 
+def get_agent_usage(db_path: str | None = None, agent_id: str = "", limit: int = 100) -> list:
+    """Returns last N usage records for an agent."""
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "SELECT * FROM usage_metrics WHERE agent_id = ? ORDER BY recorded_at DESC LIMIT ?",
+            (agent_id, limit),
+        )
+        cols = [d[0] for d in cursor.description]
+        rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+    for d in rows:
+        d["connectors"] = json.loads(d.pop("connectors_json", "{}"))
+    return rows
+
+
+def get_tenant_usage_summary(db_path: str | None = None, tenant_id: str = "default") -> dict:
+    """Returns aggregated tenant usage stats."""
+    conn = get_db_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT agent_id, active_cert_count, renewals_succeeded, renewals_failed, recorded_at
+            FROM usage_metrics
+            WHERE tenant_id = ?
+            AND id IN (SELECT MAX(id) FROM usage_metrics WHERE tenant_id = ? GROUP BY agent_id)
+            """,
+            (tenant_id, tenant_id),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    total_certs = sum(r[1] for r in rows)
+    total_ok = sum(r[2] for r in rows)
+    total_fail = sum(r[3] for r in rows)
+    last_heartbeat = max((r[4] for r in rows), default=None)
+
+    return {
+        "tenant_id": tenant_id,
+        "total_agents": len(rows),
+        "active_agents": len(rows),
+        "total_certs": total_certs,
+        "total_renewals_succeeded": total_ok,
+        "total_renewals_failed": total_fail,
+        "last_heartbeat": last_heartbeat,
+    }
+
+
 def log_renewal_event(
     cert_id: str | None,
     event_type: str,

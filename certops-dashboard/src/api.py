@@ -36,12 +36,12 @@ if __package__ is None or __package__ == "":
     import main as main_module
     from auth import get_current_user, require_admin
     from scheduler import RenewalScheduler
-    from routes import telemetry_ingest, agents
+    from routes import telemetry_ingest, agents, usage
 else:
     from . import agent_auth, auth, db, main as main_module
     from .auth import get_current_user, require_admin
     from .scheduler import RenewalScheduler
-    from .routes import telemetry_ingest, agents
+    from .routes import telemetry_ingest, agents, usage
 
 load_dotenv()
 
@@ -87,6 +87,7 @@ app.include_router(auth.router)
 app.include_router(agent_auth.router)
 app.include_router(telemetry_ingest.router)
 app.include_router(agents.router)
+app.include_router(usage.router)
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
