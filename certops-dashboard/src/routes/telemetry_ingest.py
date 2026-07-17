@@ -4,6 +4,7 @@ Validates agent token (`scope: "telemetry_push"`), enforces allow-list schema,
 and logs/stores received payload in an inspectable memory/DB sink.
 """
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -109,6 +110,11 @@ class TelemetryPayloadModel(BaseModel):
     timestamp: str
     tenant_id: str = "default"
     items: list[TelemetryItemModel] = []
+    active_cert_count: Optional[int] = None
+    renewals_succeeded: Optional[int] = None
+    renewals_failed: Optional[int] = None
+    connectors: Optional[dict] = None
+    last_heartbeat: Optional[str] = None
 
 
 @router.post("/api/telemetry/ingest", status_code=status.HTTP_202_ACCEPTED)
@@ -138,4 +144,31 @@ def ingest_telemetry(
         "tenant_id": token_tenant,
     }
     _RECEIVED_PAYLOADS.append(entry)
+
+    if payload.active_cert_count is not None:
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _agent_root = _Path(__file__).resolve().parent.parent.parent.parent / "certops-agent"
+            _agent_src = _agent_root / "src"
+            if _agent_src.exists() and str(_agent_src) not in _sys.path:
+                _sys.path.append(str(_agent_src))
+
+            if __package__ is None or __package__ == "" or not __package__.startswith("src"):
+                import db as _db
+            else:
+                from .. import db as _db
+
+            _db.insert_usage_metric(
+                db_path=os.getenv("CERTOPS_DB_PATH", "./certops.db"),
+                agent_id=payload.agent_id,
+                tenant_id=token_tenant,
+                active_cert_count=payload.active_cert_count,
+                renewals_succeeded=payload.renewals_succeeded or 0,
+                renewals_failed=payload.renewals_failed or 0,
+                connectors=payload.connectors or {},
+            )
+        except Exception:
+            pass
+
     return {"status": "accepted"}

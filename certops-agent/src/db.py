@@ -1518,6 +1518,36 @@ def insert_renewal_log(
         conn.close()
 
 
+def insert_usage_metric(
+    db_path: str | None,
+    agent_id: str,
+    tenant_id: str,
+    active_cert_count: int = 0,
+    renewals_succeeded: int = 0,
+    renewals_failed: int = 0,
+    connectors: dict | None = None,
+) -> None:
+    conn = get_db_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO usage_metrics (agent_id, tenant_id, active_cert_count, renewals_succeeded, renewals_failed, connectors_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                agent_id,
+                tenant_id,
+                active_cert_count,
+                renewals_succeeded,
+                renewals_failed,
+                json.dumps(connectors or {}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def log_renewal_event(
     cert_id: str | None,
     event_type: str,
