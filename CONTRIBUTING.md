@@ -49,7 +49,7 @@ is fine — the important part is picking one before Phase 3 and not changing it
    ```
 8. Start the frontend dev server:
    ```powershell
-   cd frontend/client && npm run dev
+   cd certops-dashboard/frontendNew && npm run dev
    ```
 
 See `RUNBOOK.md` for full startup sequence and known friction points.
