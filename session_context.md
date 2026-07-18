@@ -826,9 +826,70 @@ RESPONSE: {
 
 ---
 
-## Gate 5: Live Pipeline + Worker Kill
+## Gate 5: Live Pipeline + Worker Kill — RESOLVED (2026-07-18)
 
-> Gate 5 (live pipeline + worker kill): PENDING — could not run, step-ca service not available on this machine (`https://localhost:8443` actively refused connection). Must be run on primary dev machine before TRD.md's Celery-pipeline debt row can be upgraded from "Partially verified" to "Resolved."
+> Gate 5 is now fully resolved. See the evidence below.
+
+### Phase 0 — Live Kill/Resume Evidence (2026-07-18)
+
+**Test:** `tests/test_live_kill_resume.py` — Docker-based, fully automated.
+
+**Infrastructure fixes required:**
+1. step-ca TLS cert `dnsNames` updated to include `host.docker.internal` (was only `localhost`). Docker Desktop Windows `--network host` uses WSL2 networking where `localhost` = container loopback, not the Windows host.
+2. `STEP_CA_URL` env var set to `https://host.docker.internal:8443` for container workers.
+3. Badger DB vlog corruption resolved by clearing `C:\Users\Arpit\.step\db\` and letting step-ca recreate on startup.
+4. `ca_client.py:91-96` updated to accept `STEP_CA_ROOT_FILE` env var for `--root` flag on `step ca certificate` (required for JWK provisioner auth).
+5. `start_worker.py` container entrypoint: downloads step-cli Linux binary from GitHub releases, then `os.execvp`s celery worker.
+
+**Execution flow:**
+1. Pre-flight: step-ca health OK, DB synced to Docker volume `certops-test-data`
+2. Worker 1 started with 15s delay hook (`CERTOPS_TEST_STAGE_DELAY_SECONDS=15`)
+3. Pipeline triggered via `tasks.start_pipeline('ssh_host', '/etc/nginx/certs/local.crt', db_path='/data/certops.db')`
+4. Stage progressed: `None` → `Deployed pending reload` (cert issued via step-ca, deployed to Nginx)
+5. Delay hook parked pipeline at "Deployed pending reload" for 15s
+6. Worker 1 killed (`docker kill`) during delay window
+7. Worker 2 started fresh — `@worker_ready` signal triggered `resume_all_pending_pipelines()`
+8. Worker 2 auto-detected in-flight pipeline: `Auto-resuming in-flight pipeline for cert='/etc/nginx/certs/local.crt' (source='ssh_host', stage='Deployed pending reload')`
+9. `task_verify_reload` executed — final stage: "Reload confirmed"
+
+**All 8 verification checks passed:**
+```
+[PASS] step-ca reachable
+[PASS] step-cli installed in container
+[PASS] DB accessible on Docker volume
+[PASS] Worker killed mid-pipeline
+[PASS] DB stage at kill != 'Reload confirmed' (got 'Deployed pending reload')
+[PASS] Fresh worker started
+[PASS] Pipeline resumed after worker restart
+[PASS] Final state = 'Reload confirmed'
+```
+
+**Activity log evidence:**
+```
+[727, 'certificate_verified', 'ssh_host//etc/nginx/certs/local.crt', '2026-07-18T07:24:02.345769+00:00']
+[726, 'certificate_deployed', 'ssh_host//etc/nginx/certs/local.crt', '2026-07-18T07:23:47.798960+00:00']
+```
+
+**Renewal log evidence:**
+```
+[3153, 'reload_confirmed', 1, '2026-07-18T07:24:01.773485+00:00']
+[3152, 'deployed_pending_reload', 1, '2026-07-18T07:23:47.791587+00:00']
+```
+
+**Timestamps:**
+- Kill: 2026-07-18T07:23:51.926063+00:00
+- Resume: 2026-07-18T07:23:55.686477+00:00
+- Completed: 2026-07-18T07:24:36.093605+00:00
+
+**Worker auto-resume logs:**
+```
+[2026-07-18 07:24:01,520: INFO/MainProcess] Celery worker ready signal triggered. Scanning DB for interrupted pipelines...
+[2026-07-18 07:24:01,524: INFO/MainProcess] Auto-resuming in-flight pipeline for cert='/etc/nginx/certs/local.crt' (source='ssh_host', stage='Deployed pending reload')
+[2026-07-18 07:24:01,525: INFO/MainProcess] Resuming pipeline for cert='/etc/nginx/certs/local.crt' from DB stage='Deployed pending reload'
+[2026-07-18 07:24:01,530: INFO/MainProcess] Worker startup auto-resume complete. Resumed 1 pipeline(s).
+[2026-07-18 07:24:01,538: INFO/ForkPoolWorker-2] Running Stage 3 (Verify Reload): cert='/etc/nginx/certs/local.crt' connector='ssh_host'
+[2026-07-18 07:24:02,373: INFO/ForkPoolWorker-2] Task tasks.verify_reload[...] succeeded: {'stage': 'Reload confirmed', 'success': True}
+```
 
 ---
 
@@ -1422,7 +1483,7 @@ certops-agent/tests/test_tier1_connector_precedence.py::TestTier1ConnectorPreced
 - This parks the pipeline durably at `"Deployed pending reload"` in the DB for the entire delay window.
 - A watcher process can then `taskkill /F` the celery worker during this window and observe the stuck stage.
 
-**Evidence:** NOT YET RUN. The delay mechanism is built and the gate is documented in AGENTS.md, but no live kill/resume test has been executed with this hook. Part B remains an open gate.
+**Evidence:** RESOLVED 2026-07-18. Live kill/resume test (`tests/test_live_kill_resume.py`) executed successfully. Worker killed during delay hook window, fresh worker auto-resumed pipeline from DB state. See Gate 5 evidence above.
 
 ### Verification Checks (Task 11 — raw output)
 

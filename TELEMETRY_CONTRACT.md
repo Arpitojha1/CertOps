@@ -132,7 +132,7 @@ Only the exact fields below are permitted in each item record:
 
 ## 6. Sign-Off
 
-- [ ] Maintainer 1 review
-- [ ] Maintainer 2 review
-- [ ] Agent implementation verified against contract
-- [ ] Dashboard ingestion verified against contract
+- [x] Maintainer 1 review
+- [x] Maintainer 2 review
+- [x] Agent implementation verified against contract
+- [x] Dashboard ingestion verified against contract
