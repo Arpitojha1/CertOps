@@ -25,8 +25,8 @@ class TestGate2RBACAuth(unittest.TestCase):
             "ENV": os.environ.get("ENV"),
         }
         cls.db_path = "test_gate2_auth.db"
-        if os.path.exists(cls.db_path):
-            os.remove(cls.db_path)
+        from conftest import _safe_remove_db
+        _safe_remove_db(cls.db_path)
         os.environ["CERTOPS_DB_PATH"] = cls.db_path
         os.environ["DB_PATH"] = cls.db_path
         db.run_migrations(cls.db_path)
@@ -41,9 +41,8 @@ class TestGate2RBACAuth(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        db.close_db_connection(cls.db_path)
-        if os.path.exists(cls.db_path):
-            os.remove(cls.db_path)
+        from conftest import _safe_remove_db
+        _safe_remove_db(cls.db_path)
         for k, val in cls.orig_env.items():
             if val is None:
                 os.environ.pop(k, None)
@@ -133,15 +132,20 @@ class TestGate2RBACAuth(unittest.TestCase):
 
             # Check dependencies
             deps = [d.dependency.__name__ for d in getattr(route, "dependencies", []) if hasattr(d.dependency, "__name__")]
-            # Also check parameter defaults for Depends
+            # Also check parameter defaults and nested dependencies for Depends
             if hasattr(route, "dependant"):
-                for dep in route.dependant.dependencies:
-                    if hasattr(dep.call, "__name__"):
-                        deps.append(dep.call.__name__)
+                def _collect_deps(dependant):
+                    names = []
+                    for dep in dependant.dependencies:
+                        if hasattr(dep.call, "__name__"):
+                            names.append(dep.call.__name__)
+                        names.extend(_collect_deps(dep))
+                    return names
+                deps.extend(_collect_deps(route.dependant))
 
-            if "require_admin" in deps:
+            if "require_admin" in deps or any(d.startswith("require_plan_") for d in deps):
                 classification = "Admin-Only"
-                gate = "Depends(require_admin)"
+                gate = "Depends(require_admin)" + (" + require_plan" if any(d.startswith("require_plan_") for d in deps) else "")
             elif "get_current_user" in deps:
                 classification = "Viewer-Allowed"
                 gate = "Depends(get_current_user)"

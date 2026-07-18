@@ -51,12 +51,11 @@ class TestUsageIngest(unittest.TestCase):
         clear_received_payloads()
 
     def tearDown(self):
-        db.close_db_connection(self.db_path)
+        from conftest import _safe_remove_db
+        _safe_remove_db(self.db_path)
         os.environ.pop("CERTOPS_DB_PATH", None)
         register_agent_token("test-usage-token", revoked=True)
         clear_received_payloads()
-        if os.path.exists(self.db_path):
-            os.unlink(self.db_path)
 
     def test_usage_stored_on_ingest(self):
         from fastapi.testclient import TestClient
@@ -128,11 +127,10 @@ class TestUsageAPI(unittest.TestCase):
         self.client = TestClient(api.app)
 
     def tearDown(self):
-        db.close_db_connection(self.db_path)
+        from conftest import _safe_remove_db
+        _safe_remove_db(self.db_path)
         os.environ.pop("CERTOPS_DB_PATH", None)
         os.environ.pop("JWT_SECRET", None)
-        if os.path.exists(self.db_path):
-            os.unlink(self.db_path)
 
     def _admin_token(self):
         from auth import _make_token

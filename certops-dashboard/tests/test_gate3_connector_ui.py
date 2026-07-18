@@ -52,8 +52,8 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
             "COOKIE_SECURE": os.environ.get("COOKIE_SECURE"),
         }
         cls.db_path = "./test_gate3_connectors.db"
-        if os.path.exists(cls.db_path):
-            os.remove(cls.db_path)
+        from conftest import _safe_remove_db
+        _safe_remove_db(cls.db_path)
         os.environ["CERTOPS_DB_PATH"] = cls.db_path
         os.environ["DB_PATH"] = cls.db_path
         os.environ["ENV"] = "development"
@@ -64,9 +64,8 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        db.close_db_connection(cls.db_path)
-        if os.path.exists(cls.db_path):
-            os.remove(cls.db_path)
+        from conftest import _safe_remove_db
+        _safe_remove_db(cls.db_path)
         for k, val in cls.orig_env.items():
             if val is None:
                 os.environ.pop(k, None)
@@ -75,9 +74,8 @@ class TestGate3ConnectorUIAndThresholds(unittest.TestCase):
 
     def setUp(self):
         # Reset DB before each test
-        db.close_db_connection(self.db_path)
-        if os.path.exists(self.db_path):
-            os.remove(self.db_path)
+        from conftest import _safe_remove_db
+        _safe_remove_db(self.db_path)
         db.run_migrations(self.db_path)
 
         from src import auth

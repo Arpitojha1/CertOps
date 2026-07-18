@@ -11,8 +11,15 @@ Individual tests that need specific vars set them in setUp/setUpClass and
 clean up in tearDown/tearDownClass, which is the existing pattern.
 """
 
+import gc
+import logging
 import os
+import sqlite3
+import time
+
 import pytest
+
+logger = logging.getLogger(__name__)
 
 
 # All env vars that any dashboard test file mutates (discovered by grep).
@@ -97,4 +104,56 @@ def _isolate_env_vars_function():
             os.environ.pop(var, None)
         else:
             os.environ[var] = orig
+
+
+def _safe_remove_db(db_path: str, retries: int = 3, delay: float = 0.1) -> None:
+    """Close all connections, GC, and delete a SQLite DB file with retry backoff.
+
+    On Windows, SQLite file handles may not be released immediately after
+    close_db_connection() due to lingering references in TestClient app state
+    or WAL/SHM auxiliary files. This function retries with exponential backoff.
+    If file deletion ultimately fails, it falls back to a SQL-level table wipe
+    so that subsequent run_migrations() starts with clean tables.
+    """
+    from src import db as _db
+
+    _db.reset_db_connections()
+    gc.collect()
+    deleted = False
+    for attempt in range(retries):
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            for suffix in ("-wal", "-shm"):
+                sidecar = db_path + suffix
+                if os.path.exists(sidecar):
+                    try:
+                        os.remove(sidecar)
+                    except OSError:
+                        pass
+            deleted = True
+            break
+        except OSError as exc:
+            if attempt < retries - 1:
+                gc.collect()
+                time.sleep(delay * (2 ** attempt))
+            else:
+                logger.warning("Could not delete %s after %d retries: %s — using SQL wipe fallback", db_path, retries, exc)
+
+    if not deleted and os.path.exists(db_path):
+        _TABLE_NAMES = [
+            "certificates", "groups", "maintenance_windows",
+            "notification_policies", "notification_log", "renewal_log",
+            "users", "user_invites", "connectors", "activity_log",
+            "agent_tokens", "settings", "agents", "usage_metrics",
+        ]
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            for table in _TABLE_NAMES:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            conn.execute("PRAGMA user_version = 0")
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.warning("SQL wipe fallback failed for %s: %s", db_path, exc)
 
