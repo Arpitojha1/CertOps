@@ -25,10 +25,7 @@ _agent_src = _agent_root / "src"
 if _agent_src.exists() and str(_agent_src) not in sys.path:
     sys.path.append(str(_agent_src))
 
-if __package__ is None or __package__ == "":
-    import db
-else:
-    from . import db
+import db
 
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-before-any-external-access")
 if JWT_SECRET == "change-me-before-any-external-access":
@@ -137,6 +134,51 @@ def me(current_user: dict = Depends(get_current_user)):
     return {"id": user["id"], "email": user["email"], "role": user["role"]}
 
 
+# ─── Tier 2: Profile & password update ────────────────────────────────────────
+
+class UpdateProfileRequest(BaseModel):
+    email: str | None = None
+
+
+class UpdatePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.put("/auth/me")
+def update_profile(body: UpdateProfileRequest, response: Response, current_user: dict = Depends(get_current_user)):
+    """Update the authenticated user's email."""
+    user_id = int(current_user["sub"])
+    user = db.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    new_email = body.email or user["email"]
+    if body.email and body.email != user["email"]:
+        if db.get_user_by_email(body.email):
+            raise HTTPException(status_code=409, detail="Email already in use")
+        db.update_user_email(user_id, body.email)
+    tid = current_user.get("tenant_id", "default")
+    token = _make_token(user_id, new_email, user["role"], tenant_id=tid)
+    response.set_cookie(COOKIE_NAME, token, **_cookie_kwargs())
+    db.log_activity(event_type="profile_updated", actor_user_id=user_id, actor_email=new_email)
+    return {"id": user_id, "email": new_email, "role": user["role"]}
+
+
+@router.put("/auth/password")
+def update_password(body: UpdatePasswordRequest, current_user: dict = Depends(get_current_user)):
+    """Change the authenticated user's password."""
+    user_id = int(current_user["sub"])
+    user = db.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not verify_password(body.current_password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    new_hash = hash_password(body.new_password)
+    db.update_user_password(user_id, new_hash)
+    db.log_activity(event_type="password_changed", actor_user_id=user_id, actor_email=user["email"])
+    return {"status": "ok", "message": "Password updated successfully"}
 @router.post("/auth/logout")
 def logout(response: Response):
     response.delete_cookie(COOKIE_NAME, path="/", samesite="lax")
