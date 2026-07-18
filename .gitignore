@@ -13,7 +13,7 @@ AGENTS.md
 .claude
 docs/*
 opencode.json
-
+session_context.md
 # Python
 venv/
 __pycache__/
@@ -43,4 +43,4 @@ trigger.json
 
 # Tooling artifacts
 .opencode/
-SESSION_REVIEW_*.md
+SESSION_REVIEW_*.md

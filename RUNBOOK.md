@@ -7,8 +7,8 @@ Purpose: get from a cold machine to "main.py can run the renewal loop" without l
 After filling in `.env` (copy from `.env.example`), run once to create the initial admin user:
 
 ```powershell
-cd C:\Arpit\CertOps
-.\venv\Scripts\python.exe src/seed_admin.py
+cd C:\Users\Arpit\certOps
+.\venv\Scripts\python.exe certops-dashboard/src/seed_admin.py
 ```
 
 Required env vars: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `JWT_SECRET`. Re-running is safe (exits cleanly if already exists).
@@ -16,12 +16,12 @@ Required env vars: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `JWT_SECRET`. Re-running is 
 ## 0b. Start the API server
 
 ```powershell
-.\venv\Scripts\python.exe -m uvicorn src.api:app --host 0.0.0.0 --port 8000 --reload
+.\venv\Scripts\python.exe -m uvicorn certops-dashboard.src.api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Or directly:
 ```powershell
-.\venv\Scripts\python.exe src/api.py
+.\venv\Scripts\python.exe certops-dashboard/src/api.py
 ```
 
 The Vite dev server proxies `/api/*` and `/auth/*` to `http://localhost:8000`, so the frontend only needs to know about port 3000.
@@ -154,7 +154,7 @@ each stage transition. Recovery is automatic on the next worker startup.
 
 ### What happens on crash
 1. The `@worker_ready.connect` signal fires when a new Celery worker starts.
-2. `on_worker_ready()` in `src/tasks.py` calls `resume_all_pending_pipelines()`.
+2. `on_worker_ready()` in `certops-agent/src/tasks.py` calls `resume_all_pending_pipelines()`.
 3. This queries `certops.db` for any certificate with `pipeline_stage IN
    ('Renewed', 'Deployed pending reload')`.
 4. Each found certificate is resumed from its persisted DB stage via

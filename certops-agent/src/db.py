@@ -1436,13 +1436,13 @@ def list_notification_policies(
             params.append(tenant_id)
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
         cursor = conn.execute(
-            f"SELECT id, group_id, threshold_days FROM notification_policies{where_sql} ORDER BY threshold_days DESC",
+            f"SELECT id, group_id, threshold_days, tenant_id FROM notification_policies{where_sql} ORDER BY threshold_days DESC",
             params,
         )
         rows = cursor.fetchall()
     finally:
         conn.close()
-    return [{"id": r[0], "group_id": r[1], "threshold_days": float(r[2])} for r in rows]
+    return [{"id": r[0], "group_id": r[1], "threshold_days": float(r[2]), "tenant_id": r[3]} for r in rows]
 
 
 def get_notification_policy(

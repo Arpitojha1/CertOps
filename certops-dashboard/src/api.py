@@ -38,10 +38,11 @@ if __package__ is None or __package__ == "":
     from scheduler import RenewalScheduler
     from routes import telemetry_ingest, agents, usage
 else:
-    from . import agent_auth, auth, db
+    from . import agent_auth, auth
+    import db
     import main as main_module
     from .auth import get_current_user, require_admin, require_plan
-    from .scheduler import RenewalScheduler
+    from scheduler import RenewalScheduler
     from .routes import telemetry_ingest, agents, usage
 
 load_dotenv()

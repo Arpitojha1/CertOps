@@ -1,0 +1,12 @@
+# Repository Licensing & Component Boundary Notice
+
+This repository contains two distinct architectural components with separate licensing terms:
+
+## 1. `certops-agent/` — Apache License 2.0
+The entire contents of the `certops-agent/` directory, including all Python source files (`certops-agent/src/`), tests (`certops-agent/tests/`), and standalone worker scripts, are licensed under the **Apache License, Version 2.0**. You may freely adopt, modify, distribute, or self-host this component under the terms of the Apache 2.0 license.
+
+## 2. `certops-dashboard/` — Commercial / Proprietary (Closed Source)
+The contents of the `certops-dashboard/` directory, including the backend API server (`certops-dashboard/src/`), modern web UI (`certops-dashboard/frontendNew/`), and commercial tier gating mechanisms, are **proprietary and closed-source**. They are NOT covered by the Apache 2.0 license. Downstream users or redistributors must not assume Apache 2.0 rights over `certops-dashboard/`.
+
+## 3. Shared Root Utilities
+Root-level configuration templates (`.env.example`, `requirements.txt`, `docker-compose.yml`) and documentation files (`README.md`, `SETUP.md`, `USAGE.md`, `AGENT_USAGE.md`, `CONTRIBUTING.md`, `HISTORY.md`) are provided under the **Apache License, Version 2.0**.

@@ -1,0 +1,36 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+
+  --color-brand-dark: #141414;
+  --color-brand-bg: #EDEFE0;
+  --color-brand-lime: #D6F24C;
+  --color-brand-purple: #B4A6F0;
+  --color-brand-canvas: #F8F9F2;
+  
+  /* Additional neutral colors to blend well */
+  --color-brand-gray: #F5F6ED; /* Lighter than bg for cards */
+  --color-brand-dark-muted: #2A2A2A;
+}
+
+body {
+  @apply bg-brand-bg text-brand-dark font-sans antialiased;
+}
+
+/* Custom scrollbar for a cleaner look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-neutral-300 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-neutral-400;
+}
