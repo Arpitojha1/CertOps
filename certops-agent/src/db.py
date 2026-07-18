@@ -42,7 +42,7 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None) -> None:
@@ -176,6 +176,8 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
         log_cols = {row[1] for row in cursor.fetchall()}
         if "vault_source" not in log_cols:
             conn.execute("ALTER TABLE renewal_log ADD COLUMN vault_source TEXT")
+        if "tenant_id" not in log_cols:
+            conn.execute("ALTER TABLE renewal_log ADD COLUMN tenant_id TEXT DEFAULT 'default'")
 
         conn.execute(
             """

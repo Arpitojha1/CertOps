@@ -51,6 +51,7 @@ class TestLiveTwoTenantIntegration(unittest.TestCase):
         cls.token_b = f"token_b_live_{cls.run_id}"
 
         # Provision Tenant A & B Agent Tokens
+        db.run_migrations(cls.db_path)
         db.register_agent_token("Agent A Live", cls.token_a, tenant_id="tenant_A")
         db.register_agent_token("Agent B Live", cls.token_b, tenant_id="tenant_B")
 
@@ -158,14 +159,14 @@ class TestLiveTwoTenantIntegration(unittest.TestCase):
         def trigger_a():
             try:
                 barrier.wait(timeout=5.0)
-                tasks.start_pipeline.apply_async(args=["hashicorp", self.cert_a_name, self.db_path], queue=self.q_a)
+                tasks.start_pipeline("hashicorp", self.cert_a_name, self.db_path)
             except Exception as e:
                 errors.append(f"Thread A error: {e}")
 
         def trigger_b():
             try:
                 barrier.wait(timeout=5.0)
-                tasks.start_pipeline.apply_async(args=["hashicorp", self.cert_b_name, self.db_path], queue=self.q_b)
+                tasks.start_pipeline("hashicorp", self.cert_b_name, self.db_path)
             except Exception as e:
                 errors.append(f"Thread B error: {e}")
 
