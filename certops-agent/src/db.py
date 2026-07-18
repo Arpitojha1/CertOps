@@ -42,7 +42,7 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None) -> None:
@@ -252,6 +252,14 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
 
         # Idempotent tenant_id migrations for tables added without it
         for _tbl in ("groups", "maintenance_windows", "notification_policies", "notification_log", "activity_log", "renewal_log", "agent_tokens"):
@@ -304,6 +312,16 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
             conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_tenant_time ON usage_metrics (tenant_id, recorded_at)")
             conn.execute(f"PRAGMA user_version = 5")
             ver = 5
+
+        if ver < 6:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            conn.execute(f"PRAGMA user_version = 6")
+            ver = 6
 
         cur = conn.execute("SELECT COUNT(*) FROM connectors")
         if cur.fetchone()[0] == 0 and os.getenv("SKIP_DEFAULT_CONNECTORS") != "1":
@@ -525,6 +543,26 @@ def get_user_by_id(user_id: int, db_path: str | None = None) -> dict[str, Any] |
     if not row:
         return None
     return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4], "tenant_id": row[5] or "default"}
+
+
+def update_user_email(user_id: int, email: str, db_path: str | None = None) -> bool:
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute("UPDATE users SET email = ? WHERE id = ?", (email, user_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def update_user_password(user_id: int, password_hash: str, db_path: str | None = None) -> bool:
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 
 def create_invite(
@@ -1122,6 +1160,23 @@ def get_certificate(
     }
 
 
+def delete_certificate(
+    vault_source: str, name: str, db_path: str | None = None, tenant_id: str | None = None
+) -> bool:
+    conn = get_db_connection(db_path)
+    try:
+        query = "DELETE FROM certificates WHERE vault_source = ? AND name = ?"
+        params: list[Any] = [vault_source, name]
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
+        cursor = conn.execute(query, params)
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
 def create_group(name: str, description: str = "", tenant_id: str = "default", db_path: str | None = None) -> int:
     conn = get_db_connection(db_path)
     try:
@@ -1352,6 +1407,46 @@ def list_notification_policies(
     finally:
         conn.close()
     return [{"id": r[0], "group_id": r[1], "threshold_days": float(r[2])} for r in rows]
+
+
+def get_notification_policy(
+    policy_id: int,
+    db_path: str | None = None,
+) -> dict[str, Any] | None:
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "SELECT id, group_id, threshold_days, tenant_id FROM notification_policies WHERE id = ?",
+            (policy_id,),
+        )
+        r = cursor.fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return None
+    return {"id": r[0], "group_id": r[1], "threshold_days": float(r[2]), "tenant_id": r[3]}
+
+
+def delete_notification_policy(
+    policy_id: int,
+    tenant_id: str | None = None,
+    db_path: str | None = None,
+) -> bool:
+    conn = get_db_connection(db_path)
+    try:
+        if tenant_id is not None:
+            cursor = conn.execute(
+                "DELETE FROM notification_policies WHERE id = ? AND tenant_id = ?",
+                (policy_id, tenant_id),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM notification_policies WHERE id = ?", (policy_id,)
+            )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 
 def has_notification_been_sent(
@@ -1910,10 +2005,41 @@ class renewal_context:
         return False
 
 
+def get_setting(key: str, default: Any = None, db_path: str | None = None) -> Any:
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return default
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return row[0]
+
+
+def set_setting(key: str, value: Any, db_path: str | None = None) -> None:
+    conn = get_db_connection(db_path)
+    try:
+        val_str = json.dumps(value) if not isinstance(value, str) else value
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, val_str),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     test_db = "./test_certops.db"
+    close_db_connection(test_db)
     if Path(test_db).exists():
         Path(test_db).unlink()
+
+    run_migrations(test_db)
 
     upsert_certificate("hashicorp", "cert-a", datetime.now(timezone.utc), version="v1", connector_category="secret_store", db_path=test_db)
     upsert_certificate("ssh_host", "/etc/nginx/certs/local.crt", datetime.now(timezone.utc), version="v1", connector_category="host", pipeline_stage="Renewed", db_path=test_db)
@@ -1930,6 +2056,15 @@ if __name__ == "__main__":
     cert = get_certificate("ssh_host", "/etc/nginx/certs/local.crt", db_path=test_db)
     assert cert is not None and cert["pipeline_stage"] == "Deployed, pending reload"
 
+    # Test delete_certificate
+    assert delete_certificate("hashicorp", "cert-a", db_path=test_db) is True
+    assert get_certificate("hashicorp", "cert-a", db_path=test_db) is None
+
+    # Test get_setting / set_setting
+    assert get_setting("test_key", default="fallback", db_path=test_db) == "fallback"
+    set_setting("test_key", {"foo": "bar"}, db_path=test_db)
+    assert get_setting("test_key", db_path=test_db) == {"foo": "bar"}
+
     insert_renewal_log("cert-a", "discovered", success=True, connector_category="secret_store", connector_type="hashicorp", db_path=test_db)
     insert_renewal_log("cert-a", "error", success=False, connector_category="secret_store", connector_type="hashicorp", detail="simulated error", db_path=test_db)
     logs = get_renewal_logs("cert-a", db_path=test_db)
@@ -1937,7 +2072,9 @@ if __name__ == "__main__":
     assert logs[0]["event_type"] == "discovered" and bool(logs[0]["success"]) is True
     assert logs[1]["event_type"] == "error" and bool(logs[1]["success"]) is False
 
-    print("db.py self-test passed: connector_category, pipeline_stage, and renewal_log verified.")
+    close_db_connection(test_db)
     if Path(test_db).exists():
         Path(test_db).unlink()
+    print("db.py self-test passed: connector_category, pipeline_stage, renewal_log, delete_certificate, and settings verified.")
+
 

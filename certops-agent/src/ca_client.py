@@ -62,6 +62,10 @@ def issue_certificate(
         if ca_url:
             cmd.extend(["--ca-url", ca_url])
 
+        root_file = os.getenv("STEP_CA_ROOT_FILE")
+        if root_file and os.path.exists(root_file):
+            cmd.extend(["--root", root_file])
+
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:
             raise RuntimeError(
