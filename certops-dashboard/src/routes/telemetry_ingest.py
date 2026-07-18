@@ -154,10 +154,7 @@ def ingest_telemetry(
             if _agent_src.exists() and str(_agent_src) not in _sys.path:
                 _sys.path.append(str(_agent_src))
 
-            if __package__ is None or __package__ == "" or not __package__.startswith("src"):
-                import db as _db
-            else:
-                from .. import db as _db
+            import db as _db
 
             _db.insert_usage_metric(
                 db_path=os.getenv("CERTOPS_DB_PATH", "./certops.db"),

@@ -11,10 +11,7 @@ _agent_src = _agent_root / "src"
 if _agent_src.exists() and str(_agent_src) not in sys.path:
     sys.path.append(str(_agent_src))
 
-if __package__ is None or __package__ == "":
-    import db
-else:
-    from .. import db
+import db
 
 router = APIRouter(tags=["Usage"])
 

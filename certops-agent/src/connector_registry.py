@@ -6,7 +6,16 @@ Replaces the hardcoded if/elif dispatch chain in main.py.
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Any
+
+_src_dir = Path(__file__).resolve().parent
+_project_dir = _src_dir.parent
+if str(_project_dir) not in sys.path:
+    sys.path.insert(0, str(_project_dir))
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
 
 logger = logging.getLogger(__name__)
 

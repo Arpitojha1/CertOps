@@ -5,6 +5,15 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from celery import Celery, chain
 from celery.signals import worker_ready
+import sys
+from pathlib import Path
+
+_src_dir = Path(__file__).resolve().parent
+_project_dir = _src_dir.parent
+if str(_project_dir) not in sys.path:
+    sys.path.insert(0, str(_project_dir))
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
 
 load_dotenv()
 from src import ca_client, db, host_connector, main, scheduler, verify

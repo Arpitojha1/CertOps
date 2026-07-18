@@ -28,10 +28,7 @@ _dashboard_src = _dashboard_root / "src"
 if _dashboard_src.exists() and str(_dashboard_src) not in sys.path:
     sys.path.append(str(_dashboard_src))
 
-if __package__ is None or __package__ == "":
-    import db
-else:
-    from . import db
+import db
 
 logger = logging.getLogger("certops.agent_auth")
 

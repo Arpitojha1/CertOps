@@ -14,20 +14,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_src_dir = Path(__file__).resolve().parent
+_project_dir = _src_dir.parent
+if str(_project_dir) not in sys.path:
+    sys.path.insert(0, str(_project_dir))
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
+
 import requests
 from dotenv import load_dotenv
-from agent_telemetry import AgentTelemetryClient
-
 if __package__ is None or __package__ == "":
     import azurekeyvault
     import ca_client
+    import connector_registry
     import db
     import host_connector
     import notifier
     import vault_client
     import verify
+    from agent_telemetry import AgentTelemetryClient
 else:
-    from . import azurekeyvault, ca_client, db, host_connector, notifier, vault_client, verify
+    from . import azurekeyvault, ca_client, connector_registry, db, host_connector, notifier, vault_client, verify
+    from .agent_telemetry import AgentTelemetryClient
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -104,7 +112,6 @@ def get_active_connectors(db_path: str | None = None) -> list[Any]:
     Returns active connectors strictly from the DB 'connectors' table authoritative source.
     Uses connector_registry.resolve_connector() for type dispatch.
     """
-    from src import connector_registry
     connectors = []
     try:
         db_rows = db.list_connectors(active_only=True, db_path=db_path)
@@ -136,7 +143,6 @@ def confirm_and_reload_host(
     if verify_port is None:
         verify_port = int(os.getenv("VERIFY_PORT", "443"))
 
-    from src import connector_registry
     db_row = db.get_connector_by_name(connector_name)
     if not db_row:
         raise RuntimeError(f"Connector '{connector_name}' not found in DB.")
@@ -398,14 +404,15 @@ def cmd_setup(args):
 
 
 def _try_push_telemetry(summary: dict, db_path: str | None = None) -> None:
-    """Push telemetry to dashboard if agent.db is configured."""
+    """Push telemetry to dashboard if agent.db or environment variables are configured."""
     from agent_db import get_identity, get_usage_snapshot, update_usage_snapshot
 
-    agent_id = get_identity("agent_id", db_path)
-    token = get_identity("token", db_path)
-    dashboard_url = get_identity("dashboard_url", db_path)
+    agent_id = get_identity("agent_id", db_path) or os.getenv("AGENT_ID", "Local-Windows-Dev-Agent")
+    token = get_identity("token", db_path) or os.getenv("AGENT_TOKEN")
+    dashboard_url = get_identity("dashboard_url", db_path) or os.getenv("DASHBOARD_URL")
+    ingest_url = os.getenv("INGEST_URL") or (f"{dashboard_url.rstrip('/')}/api/telemetry/ingest" if dashboard_url else None)
 
-    if not all([agent_id, token, dashboard_url]):
+    if not token or not ingest_url:
         return
 
     total_ok = sum(v.get("succeeded", 0) for v in summary.values() if isinstance(v, dict))
@@ -440,7 +447,7 @@ def _try_push_telemetry(summary: dict, db_path: str | None = None) -> None:
             agent_id=agent_id,
             agent_version=os.getenv("CERTOPS_VERSION", "2.5c"),
             agent_token=token,
-            ingest_url=f"{dashboard_url.rstrip('/')}/api/telemetry/ingest",
+            ingest_url=ingest_url,
         )
         status_code, _ = client.push(connectors=[], usage_snapshot=usage)
     except Exception:
@@ -454,7 +461,6 @@ def run_renewal_loop(db_path: str | None = None) -> RenewalSummary:
     """
     load_dotenv()
 
-    from src import connector_registry
     connector_registry.seed_connectors_from_env(db_path=db_path)
 
     threshold_days = float(os.getenv("RENEWAL_THRESHOLD_DAYS", "2"))

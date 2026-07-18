@@ -18,8 +18,8 @@ if __package__ is None or __package__ == "":
     import agent_auth
     import auth
 else:
-    from .. import db, agent_auth
-    from .. import auth
+    import db
+    from .. import agent_auth, auth
 
 router = APIRouter(tags=["Agents"])
 

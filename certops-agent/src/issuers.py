@@ -5,8 +5,16 @@ Provides a unified CAIssuer interface implemented by StepCAIssuer and ACMEIssuer
 import os
 import subprocess
 import tempfile
-from pathlib import Path
 from typing import Any
+import sys
+from pathlib import Path
+
+_src_dir = Path(__file__).resolve().parent
+_project_dir = _src_dir.parent
+if str(_project_dir) not in sys.path:
+    sys.path.insert(0, str(_project_dir))
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
 
 from src import ca_client
 
