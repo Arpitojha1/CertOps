@@ -42,7 +42,7 @@ def _parse_utc_datetime(dt_val: Any) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None) -> None:
@@ -185,7 +185,8 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'viewer',
                 created_at TEXT NOT NULL,
-                tenant_id TEXT DEFAULT 'default'
+                tenant_id TEXT DEFAULT 'default',
+                plan TEXT DEFAULT 'Starter'
             )
             """
         )
@@ -220,6 +221,9 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
         usr_cols = {row[1] for row in cursor.fetchall()}
         if "tenant_id" not in usr_cols:
             conn.execute("ALTER TABLE users ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+        if "plan" not in usr_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'Starter'")
+            conn.execute("UPDATE users SET plan = 'Enterprise' WHERE role = 'admin'")
 
         cursor = conn.execute("PRAGMA table_info(connectors)")
         conn_cols = {row[1] for row in cursor.fetchall()}
@@ -322,6 +326,15 @@ def run_migrations(db_path_or_conn: str | sqlite3.Connection | Any | None = None
             """)
             conn.execute(f"PRAGMA user_version = 6")
             ver = 6
+
+        if ver < 7:
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'Starter'")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("UPDATE users SET plan = 'Enterprise' WHERE role = 'admin'")
+            conn.execute(f"PRAGMA user_version = 7")
+            ver = 7
 
         cur = conn.execute("SELECT COUNT(*) FROM connectors")
         if cur.fetchone()[0] == 0 and os.getenv("SKIP_DEFAULT_CONNECTORS") != "1":
@@ -500,14 +513,17 @@ def create_user(
     password_hash: str,
     role: str = "viewer",
     tenant_id: str = "default",
+    plan: str | None = None,
     db_path: str | None = None,
 ) -> int:
+    if plan is None:
+        plan = "Enterprise" if role == "admin" else "Starter"
     now_iso = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "INSERT INTO users (email, password_hash, role, created_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
-            (email, password_hash, role, now_iso, tenant_id),
+            "INSERT INTO users (email, password_hash, role, created_at, tenant_id, plan) VALUES (?, ?, ?, ?, ?, ?)",
+            (email, password_hash, role, now_iso, tenant_id, plan),
         )
         conn.commit()
         return cursor.lastrowid
@@ -519,7 +535,7 @@ def get_user_by_email(email: str, db_path: str | None = None) -> dict[str, Any] 
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "SELECT id, email, password_hash, role, created_at, tenant_id FROM users WHERE email = ?",
+            "SELECT id, email, password_hash, role, created_at, tenant_id, plan FROM users WHERE email = ?",
             (email,),
         )
         row = cursor.fetchone()
@@ -527,14 +543,14 @@ def get_user_by_email(email: str, db_path: str | None = None) -> dict[str, Any] 
         conn.close()
     if not row:
         return None
-    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4], "tenant_id": row[5] or "default"}
+    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4], "tenant_id": row[5] or "default", "plan": row[6] or "Starter"}
 
 
 def get_user_by_id(user_id: int, db_path: str | None = None) -> dict[str, Any] | None:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.execute(
-            "SELECT id, email, password_hash, role, created_at, tenant_id FROM users WHERE id = ?",
+            "SELECT id, email, password_hash, role, created_at, tenant_id, plan FROM users WHERE id = ?",
             (user_id,),
         )
         row = cursor.fetchone()
@@ -542,7 +558,20 @@ def get_user_by_id(user_id: int, db_path: str | None = None) -> dict[str, Any] |
         conn.close()
     if not row:
         return None
-    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4], "tenant_id": row[5] or "default"}
+    return {"id": row[0], "email": row[1], "password_hash": row[2], "role": row[3], "created_at": row[4], "tenant_id": row[5] or "default", "plan": row[6] or "Starter"}
+
+
+def update_user_plan(user_id: int, plan: str, db_path: str | None = None) -> bool:
+    conn = get_db_connection(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE users SET plan = ? WHERE id = ?",
+            (plan, user_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
 
 
 def update_user_email(user_id: int, email: str, db_path: str | None = None) -> bool:
@@ -635,7 +664,12 @@ def mark_invite_used(token: str, db_path: str | None = None) -> bool:
 
 # ─── Connector Credential Encryption & Redaction ─────────────────────────────
 
-_EPHEMERAL_DEV_FERNET_KEY = Fernet.generate_key()
+_ephemeral_env = os.environ.get("_EPHEMERAL_DEV_FERNET_KEY_SINGLETON")
+if _ephemeral_env:
+    _EPHEMERAL_DEV_FERNET_KEY = _ephemeral_env.encode("utf-8")
+else:
+    _EPHEMERAL_DEV_FERNET_KEY = Fernet.generate_key()
+    os.environ["_EPHEMERAL_DEV_FERNET_KEY_SINGLETON"] = _EPHEMERAL_DEV_FERNET_KEY.decode("utf-8")
 
 
 def _get_fernet() -> Fernet:

@@ -55,9 +55,9 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def _make_token(user_id: int, email: str, role: str, tenant_id: str = "default") -> str:
+def _make_token(user_id: int, email: str, role: str, tenant_id: str = "default", plan: str = "Starter") -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS)
-    payload = {"sub": str(user_id), "email": email, "role": role, "tenant_id": tenant_id, "exp": expire}
+    payload = {"sub": str(user_id), "email": email, "role": role, "tenant_id": tenant_id, "plan": plan, "exp": expire}
     return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -66,6 +66,8 @@ def _decode_token(token: str) -> dict:
         data = pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if "tenant_id" not in data:
             data["tenant_id"] = "default"
+        if "plan" not in data:
+            data["plan"] = "Starter"
         return data
     except pyjwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
@@ -88,6 +90,16 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
+
+
+def require_plan(required_plan: str):
+    def require_plan_dependency(current_user: dict = Depends(require_admin)):
+        plan = current_user.get("plan", "Starter")
+        if plan != required_plan and plan != "Enterprise":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Requires {required_plan} plan entitlement")
+        return current_user
+    require_plan_dependency.__name__ = f"require_plan_{required_plan.lower()}"
+    return require_plan_dependency
 
 
 def require_admin_user(
@@ -120,10 +132,11 @@ def login(body: LoginRequest, response: Response):
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     tid = user.get("tenant_id") or "default"
-    token = _make_token(user["id"], user["email"], user["role"], tenant_id=tid)
+    plan = user.get("plan") or "Starter"
+    token = _make_token(user["id"], user["email"], user["role"], tenant_id=tid, plan=plan)
     response.set_cookie(COOKIE_NAME, token, **_cookie_kwargs())
     db.log_activity(event_type="user_login", actor_user_id=user["id"], actor_email=user["email"])
-    return {"id": user["id"], "email": user["email"], "role": user["role"], "tenant_id": tid}
+    return {"id": user["id"], "email": user["email"], "role": user["role"], "tenant_id": tid, "plan": plan}
 
 
 @router.get("/auth/me")
@@ -131,7 +144,7 @@ def me(current_user: dict = Depends(get_current_user)):
     user = db.get_user_by_id(int(current_user["sub"]))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    return {"id": user["id"], "email": user["email"], "role": user["role"]}
+    return {"id": user["id"], "email": user["email"], "role": user["role"], "plan": user.get("plan", "Starter")}
 
 
 # ─── Tier 2: Profile & password update ────────────────────────────────────────

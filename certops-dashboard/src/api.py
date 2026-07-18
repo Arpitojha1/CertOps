@@ -34,15 +34,14 @@ if __package__ is None or __package__ == "":
     import auth
     import db
     import main as main_module
-    from auth import get_current_user, require_admin
+    from auth import get_current_user, require_admin, require_plan
     from scheduler import RenewalScheduler
     from routes import telemetry_ingest, agents, usage
 else:
-    from . import agent_auth, auth
-    import db
+    from . import agent_auth, auth, db
     import main as main_module
-    from .auth import get_current_user, require_admin
-    from scheduler import RenewalScheduler
+    from .auth import get_current_user, require_admin, require_plan
+    from .scheduler import RenewalScheduler
     from .routes import telemetry_ingest, agents, usage
 
 load_dotenv()
@@ -997,6 +996,10 @@ class EnrollRequest(BaseModel):
     key_size: str = "RSA 2048"
 
 
+class PlanUpdateRequest(BaseModel):
+    plan: str
+
+
 @app.post("/api/certificates/bulk-renew")
 def bulk_renew(body: BulkRenewRequest, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
     from src import tasks  # noqa: PLC0415
@@ -1056,6 +1059,28 @@ def enroll_certificate(body: EnrollRequest, current_user: dict = Depends(require
             "message": f"Enrollment for {body.domain} queued. CA integration (Phase 3) pending."}
 
 
+@app.put("/api/users/{user_id}/plan")
+def update_user_plan_endpoint(
+    user_id: int,
+    body: PlanUpdateRequest,
+    current_user: dict = Depends(require_admin),
+) -> dict[str, Any]:
+    if body.plan not in ("Starter", "Professional", "Enterprise"):
+        raise HTTPException(status_code=400, detail="Invalid plan tier")
+    if not db.update_user_plan(user_id, body.plan):
+        raise HTTPException(status_code=404, detail="User not found")
+    actor_id, actor_email = _actor_from_user(current_user)
+    db.log_activity(
+        event_type="user_plan_updated",
+        actor_user_id=actor_id,
+        actor_email=actor_email,
+        target=str(user_id),
+        details={"user_id": user_id, "new_plan": body.plan},
+        tenant_id=current_user.get("tenant_id", "default"),
+    )
+    return {"status": "updated", "user_id": user_id, "plan": body.plan}
+
+
 @app.post("/api/certificates/{vault_source}/{cert_name:path}/reissue")
 def reissue_certificate(vault_source: str, cert_name: str, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
     from src import tasks  # noqa: PLC0415
@@ -1084,22 +1109,22 @@ def check_ocsp(vault_source: str, cert_name: str, current_user: dict = Depends(g
     return {"cert_id": f"{vault_source}:{cert_name}", "ocsp_status": "good", "is_stub": True}
 
 @app.get("/api/enterprise/discovery/rules")
-def get_discovery_rules(current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+def get_discovery_rules(current_user: dict = Depends(require_plan("Enterprise"))) -> dict[str, Any]:
     return {"items": [], "total": 0}
 
 
 @app.get("/api/enterprise/discovery/network-inventory")
-def get_network_inventory(current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+def get_network_inventory(current_user: dict = Depends(require_plan("Enterprise"))) -> dict[str, Any]:
     return {"items": [], "total": 0}
 
 
 @app.get("/api/enterprise/discovery/excluded")
-def get_excluded_certs(current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+def get_excluded_certs(current_user: dict = Depends(require_plan("Enterprise"))) -> dict[str, Any]:
     return {"items": [], "total": 0}
 
 
 @app.post("/api/enterprise/discovery/scan")
-def trigger_discovery_scan(current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+def trigger_discovery_scan(current_user: dict = Depends(require_plan("Enterprise"))) -> dict[str, Any]:
     caller_tenant = current_user.get("tenant_id", "default")
     actor_id, actor_email = _actor_from_user(current_user)
     db.log_activity(event_type="discovery_scan_triggered", actor_user_id=actor_id, actor_email=actor_email,
@@ -1107,7 +1132,7 @@ def trigger_discovery_scan(current_user: dict = Depends(require_admin)) -> dict[
     return {"status": "triggered", "is_stub": True, "message": "Phase 2 network probe pending."}
 
 @app.get("/api/enterprise/health/ca-status")
-def get_ca_health_status(current_user: dict = Depends(require_admin)) -> list[dict[str, Any]]:
+def get_ca_health_status(current_user: dict = Depends(require_plan("Enterprise"))) -> list[dict[str, Any]]:
     scope = _get_tenant_scope(current_user)
     logs = db.get_renewal_logs(tenant_id=scope)
     ca_stats: dict[str, dict] = {}
@@ -1130,21 +1155,21 @@ def get_ca_health_status(current_user: dict = Depends(require_admin)) -> list[di
 
 
 @app.get("/api/enterprise/health/metrics")
-def get_health_metrics(current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+def get_health_metrics(current_user: dict = Depends(require_plan("Enterprise"))) -> dict[str, Any]:
     return {"actionFailureRate": [], "discoveryEfficiency": []}
 
 @app.get("/api/enterprise/ca-policies")
-def get_ca_policies_list(current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+def get_ca_policies_list(current_user: dict = Depends(require_plan("Enterprise"))) -> dict[str, Any]:
     return {"items": [], "total": 0}
 
 
 @app.post("/api/enterprise/ca-policies")
-def create_ca_policy(body: dict, current_user: dict = Depends(require_admin)) -> dict[str, Any]:
+def create_ca_policy(body: dict, current_user: dict = Depends(require_plan("Enterprise"))) -> dict[str, Any]:
     return {"status": "stub", "note": "CA policy storage (Phase 2) not yet implemented."}
 
 
 @app.get("/api/enterprise/insights/ca-distribution")
-def get_ca_distribution(current_user: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
+def get_ca_distribution(current_user: dict = Depends(require_plan("Enterprise"))) -> list[dict[str, Any]]:
     scope = _get_tenant_scope(current_user)
     certs = db.list_all_certificates(tenant_id=scope)
     counts: dict[str, int] = {}
@@ -1155,7 +1180,7 @@ def get_ca_distribution(current_user: dict = Depends(get_current_user)) -> list[
 
 
 @app.get("/api/enterprise/insights/volume")
-def get_volume_history(current_user: dict = Depends(get_current_user)) -> list[dict[str, Any]]:
+def get_volume_history(current_user: dict = Depends(require_plan("Enterprise"))) -> list[dict[str, Any]]:
     from collections import defaultdict  # noqa: PLC0415
     scope = _get_tenant_scope(current_user)
     logs = db.get_renewal_logs(tenant_id=scope)
